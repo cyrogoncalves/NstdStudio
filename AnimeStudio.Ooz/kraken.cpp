@@ -3932,12 +3932,12 @@ void Kraken_CopyWholeMatch(byte *dst, const uint32 offset, const size_t length) 
 }
 
 namespace {
-bool step_ret(KrakenDecoder *dec, u64 src_used, u64 dst_used, bool ret) {
+bool step_ret(KrakenDecoder *dec, u64 src_used, u64 dst_used) {
   dec->src += src_used;
   dec->src_len -= src_used;
-  dec->dst_len -= dst_used;
   dec->offset += dst_used;
-  return src_used > 0 && ret;
+  dec->dst_len -= dst_used;
+  return src_used > 0;
 }
 
 bool lzna_step(KrakenDecoder *dec) {
@@ -3951,7 +3951,7 @@ bool lzna_step(KrakenDecoder *dec) {
   if (dec->hdr.uncompressed) {
     if (src_end - dec->src < dst_bytes_left) return false;
     memmove(dst, dec->src, dst_bytes_left);
-    return step_ret(dec, src_used + dst_bytes_left, dst_bytes_left, true);
+    return step_ret(dec, src_used + dst_bytes_left, dst_bytes_left);
   }
 
   uint32 v = dec->src[0] << 8 | dec->src[1]; dec->src += 2;
@@ -3963,26 +3963,22 @@ bool lzna_step(KrakenDecoder *dec) {
       dec->src = LZNA_ParseWholeMatchInfo(dec->src, &whole_match_distance);
       if (whole_match_distance > dec->offset) return false;
       Kraken_CopyWholeMatch(dst, whole_match_distance, dst_bytes_left);
-      return step_ret(dec, src_used, dst_bytes_left, true);
+      return step_ret(dec, src_used, dst_bytes_left);
     }
     if (v == 1) {
       // memset
       memset(dst, dec->src[0], dst_bytes_left);
       dec->src += 1;
-      return step_ret(dec, src_used, dst_bytes_left, true);
+      return step_ret(dec, src_used, dst_bytes_left);
     }
     if (v == 2) {
       // uncompressed
       memmove(dst, dec->src, dst_bytes_left);
-      return step_ret(dec, src_used + dst_bytes_left, dst_bytes_left, true);
+      return step_ret(dec, src_used + dst_bytes_left, dst_bytes_left);
     }
     return false;
   }
-  if (!dec->hdr.use_checksums) {
-    // const auto checksum = dec->src[0] << 16 | dec->src[1] << 8 | dec->src[2];
-    dec->src += 3;
-    // if ((crc(dec->src, compressed_size) & 0xffffff) != checksum) return false;
-  }
+  if (!dec->hdr.use_checksums) dec->src += 3; // checksum not implemented
   if (dec->src + compressed_size > src_end) return false; // Too few bytes in buffer to make any progress?
   if (compressed_size > dst_bytes_left) return false;
 
@@ -4005,42 +4001,30 @@ bool lzna_step(KrakenDecoder *dec) {
   }
 
   if (n != compressed_size) return false;
-  return step_ret(dec, src_used + n, dst_bytes_left, true);
+  return step_ret(dec, src_used + n, dst_bytes_left);
 }
 
 bool kraken_step(KrakenDecoder *dec) {
   const auto dst_bytes_left = std::min((u32)0x40000, dec->dst_len);
-  const byte *src_in = dec->src;
-  const byte *src_end = dec->src + dec->src_len;
   byte* dst = dec->dst + dec->offset;
-  const u64 src_used = dec->src - src_in;
 
   if (dec->hdr.uncompressed) {
-    if (src_end - dec->src < dst_bytes_left) return false;
+    if (dec->src_len < dst_bytes_left) return false;
     memmove(dst, dec->src, dst_bytes_left);
-    return step_ret(dec, src_used + dst_bytes_left, dst_bytes_left, true);
+    return step_ret(dec, dst_bytes_left, dst_bytes_left);
   }
 
   const u32 v = dec->src[0] << 16 | dec->src[1] << 8 | dec->src[2]; dec->src += 3;
   const u32 compressed_size = (v & 0x3ffff) + 1;  // 「......??|????????|????????」
   if (compressed_size == 0x40000) {
-    if (v >> 18 != 1) return false; // memset 「??????11|11111111|11111111」
+    if (v >> 18 != 1) return false; // 「??????11|11111111|11111111」
     memset(dst, dec->src[0], dst_bytes_left);
     dec->src += 1;
-    return step_ret(dec, src_used, dst_bytes_left, true);
+    return step_ret(dec, 0, dst_bytes_left);
   }
-  if (dec->hdr.use_checksums) {
-    // const auto checksum = dec->src[3] << 16 | dec->src[4] << 8 | dec->src[5];
-    // if ((crc(dec->src, compressed_size) & 0xffffff) != checksum) return false;
-    dec->src += 3;
-  } // not implemented
-  if (dec->src + compressed_size > src_end) return false; // Too few bytes in buffer to make any progress?
-  if (compressed_size > static_cast<uint32>(dst_bytes_left)) return false;
-
-  // if (compressed_size == dst_bytes_left) {
-  //   memmove(dst, dec->src, dst_bytes_left);
-  //   return step_ret(dec, src_used + dst_bytes_left, dst_bytes_left, true);
-  // }
+  if (dec->hdr.use_checksums) dec->src += 3; // checksum not implemented
+  if (compressed_size > dec->src_len) return false; // Too few bytes in buffer to make any progress?
+  if (compressed_size > dst_bytes_left) return false;
 
   int n;
   switch (dec->hdr.decoder_type) {
@@ -4049,9 +4033,8 @@ bool kraken_step(KrakenDecoder *dec) {
   case 12: n = Leviathan_DecodeQuantum(dec, compressed_size); break;
   default: return false;
   }
-
   if (n != compressed_size) return false;
-  return step_ret(dec, src_used + n, dst_bytes_left, true);
+  return step_ret(dec, n, dst_bytes_left);
 }
 
 
@@ -4091,10 +4074,10 @@ extern "C" {
     }
 }
 
+#if !OOZ_BUILD_DLL
+
 // The decompressor will write outside of the target buffer.
 #define SAFE_SPACE 64
-
-#if !OOZ_BUILD_DLL
 
 void error(const char *s, const char *curfile = NULL) {
   if (curfile)
