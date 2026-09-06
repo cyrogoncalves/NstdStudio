@@ -54,6 +54,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // c++ is weird
 typedef unsigned long long u64;
 typedef unsigned int u32;
+typedef unsigned char u8;
 
 // Header in front of each 256k block
 typedef struct KrakenHeader {
@@ -140,17 +141,11 @@ typedef struct MermaidLzTable {
 
 
 typedef struct KrakenDecoder {
-  // const byte *src, size_t src_len, byte *dst, size_t dst_len
+  u32 src_len, dst_len, offset, scratch_size;
   const byte *src;
   byte *dst;
-  size_t src_len;
-  u32 dst_len;
-  u32 offset;
-  // u64 src_used, dst_used; // Updated after |*_DecodeStep| to hold the number of bytes read and written.
-
-  // Pointer to a 256k buffer that holds the intermediate state in between decode phase 1 and 2.
-  byte *scratch;
-  size_t scratch_size;
+  byte *dst1;
+  byte *scratch; // Pointer to a 256k buffer that holds the intermediate state in between decode phase 1 and 2.
 
   KrakenHeader hdr;
 } KrakenDecoder;
@@ -440,13 +435,15 @@ int Log2RoundUp(const uint32 v) {
 }
 #define COPY_64_ADD(d, s, t) simde_mm_storel_epi64((simde__m128i *)(d), simde_mm_add_epi8(simde_mm_loadl_epi64((simde__m128i *)(s)), simde_mm_loadl_epi64((simde__m128i *)(t))))
 
-static KrakenDecoder *Kraken_Create(const byte *src, const size_t src_len, byte *dst, const u32 dst_len) {
+static KrakenDecoder *Kraken_Create(const byte *src, const u32 src_len, byte *dst, const u32 dst_len) {
   constexpr size_t scratch_size = 0x6c000;
   const auto dec = static_cast<KrakenDecoder *>(MallocAligned(sizeof(KrakenDecoder) + scratch_size, 16 - 1));
   memset(dec, 0, sizeof(KrakenDecoder));
   dec->src = src;
   dec->src_len = src_len;
   dec->dst = dst;
+  dec->dst1 = dst;
+  dec->offset = 0;
   dec->dst_len = dst_len;
   dec->scratch_size = scratch_size;
   dec->scratch = (byte*)(dec + 1);
@@ -2001,77 +1998,6 @@ int Kraken_GetBlockSize(const uint8 *src, const uint8 *src_end, int *dest_size, 
     return -1;
   *dest_size = dst_size;
   return src_size;
-}
-
-namespace {
-int bytes(
-    const KrakenDecoder *dec,
-    byte **output, const byte *src_end,
-    int *decoded_size, const size_t output_size, const bool force_memmove
-) {
-  auto src = dec->src;
-  uint8 *scratch = dec->scratch;
-  uint8 *scratch_end = dec->scratch + dec->scratch_size;
-  if (src_end - src < 2) return -1; // too few bytes
-
-  const byte *src_org = src;
-  int src_size, dst_size;
-  const int chunk_type = src[0] >> 4 & 0x7; //「.???....」
-  if (chunk_type == 0) {
-    if (src[0] >= 0x80) { //「?000....」
-      // In this mode, memcopy stores the length in the bottom 12 bits.
-      src_size = (src[0] << 8 | src[1]) & 0xfff; src += 2; //「1000????|????????」
-    } else {
-      if (src_end - src < 3) return -1; // too few bytes
-      src_size = src[0] << 16 | src[1] << 8 | src[2]; src += 3; //「0000..??|????????|????????」
-      if (src_size & ~0x3ffff) return -1; // reserved bits must not be set
-    }
-    if (src_size > output_size || src_end - src < src_size) return -1;
-    *decoded_size = src_size;
-    if (force_memmove)
-      memmove(*output, src, src_size);
-    else
-      *output = (byte*)src;
-    return src + src_size - src_org;
-  }
-
-  // In all the other modes, the initial bytes encode the src_size and the dst_size
-  if (src[0] >= 0x80) {
-    // short mode, 10 bit sizes
-    if (src_end - src < 3) return -1; // too few bytes
-    const uint32 bits = src[0] << 16 | src[1] << 8 | src[2]; src += 3;
-    src_size = bits & 0x3ff; //「1mmm....|......??|????????」
-    dst_size = src_size + (bits >> 10 & 0x3ff) + 1; //「1mmm????|??????..|........」
-  } else {
-    // long mode, 18 bit sizes
-    if (src_end - src < 5) return -1; // too few bytes
-    const uint32 bits = src[1] << 24 | src[2] << 16 | src[3] << 8 | src[4]; src += 5;
-    src_size = bits & 0x3ffff; //「0mmm....|........|......??|????????|????????」
-    dst_size = ((bits >> 18 | src[0] << 14) & 0x3ffff) + 1;  //「0mmm????|????????|??????..|........|........」
-    if (src_size >= dst_size) return -1;
-  }
-  if (src_end - src < src_size || dst_size > output_size) return -1;
-
-  uint8 *dst = *output;
-  if (dst == scratch) {
-    if (scratch_end - scratch < dst_size) return -1;
-    scratch += dst_size;
-  }
-
-  // printf("%d -> %d (%d)\n", src_size, dst_size, chunk_type);
-
-  int src_used = -1;
-  switch (chunk_type) {
-  case 2:
-  case 4: src_used = Kraken_DecodeBytes_Type12(src, src_size, dst, dst_size, chunk_type >> 1); break;
-  case 5: src_used = Krak_DecodeRecursive(src, src_size, dst, dst_size, scratch, scratch_end); break;
-  case 3: src_used = Krak_DecodeRLE(src, src_size, dst, dst_size, scratch, scratch_end); break;
-  case 1: src_used = Krak_DecodeTans(src, src_size, dst, dst_size, scratch, scratch_end); break;
-  }
-  if (src_used != src_size) return -1;
-  *decoded_size = dst_size;
-  return src + src_size - src_org;
-}
 }
 
 int Kraken_DecodeBytes(byte **output, const byte *src, const byte *src_end,
@@ -3866,7 +3792,7 @@ bool Mermaid_ProcessLzRuns(const int mode,
 
 static int Mermaid_DecodeQuantum(const KrakenDecoder *dec, const uint32 compressed_size) {
   byte* dst = dec->dst + dec->offset;
-  const auto dst_bytes_left = Min(0x40000, dec->dst_len);
+  const auto dst_bytes_left = std::min((u32)0x40000, dec->dst_len);
   byte *dst_end = dst + dst_bytes_left;
   const byte *src = dec->src;
   const byte *src_end = dec->src + compressed_size;
@@ -3874,34 +3800,31 @@ static int Mermaid_DecodeQuantum(const KrakenDecoder *dec, const uint32 compress
   const byte *src_in = src;
 
   while (dst_end - dst != 0) {
-    const int dst_count = std::min(static_cast<int>(dst_end - dst), 0x20000);
+    const u32 dst_count = std::min((u32)(dst_end - dst), (u32)0x20000);
     if (src_end - src < 4) return -1;
     const int chunk_hdr = src[0] << 16 | src[1] << 8 | src[2];
-    if (!(chunk_hdr & 0x800000)) {
+    if (chunk_hdr & 0x800000) { //「?.......|........|........」
+      src += 3;
+      const int src_used = chunk_hdr & 0x7ffff; //「1....???|????????|????????」
+      const int mode = chunk_hdr >> 19 & 0xf; //「1????...|........|........」
+      if (src_end - src < src_used) return -1;
+      if (src_used >= dst_count) {
+        if (src_used > dst_count || mode != 0) return -1;
+        memmove(dst, src, dst_count);
+      } else {
+        const int temp_usage = std::min(2 * dst_count + 32 + 0x4000, (u32)0x40000);
+        // Tans Lut may need upwards of 16k of temp storage
+        if (mode > 1 || src_used < 10) return -1;
+        if (!Mermaid_ReadLzTable(src, src + src_used, dst, dst_count, dst - dec->dst, temp + sizeof(MermaidLzTable), temp + temp_usage, (MermaidLzTable *)temp)) return -1;
+        if (!Mermaid_ProcessLzRuns(mode, src, src + src_used, dst, dst_count, dst - dec->dst, dst_end, (MermaidLzTable *)temp)) return -1;
+      }
+      src += src_used;
+    } else {
       // Stored without any match copying.
       byte *out = dst;
       int written_bytes;
-      const int src_used = bytes(dec, &out, src_end, &written_bytes, dst_count, false);
+      const int src_used = Kraken_DecodeBytes(&out, src, src_end, &written_bytes, dst_count, false, dec->scratch, dec->scratch + dec->scratch_size);
       if (src_used < 0 || written_bytes != dst_count) return -1;
-      src += src_used;
-    } else {
-      src += 3;
-      const int src_used = chunk_hdr & 0x7ffff;
-      const int mode = chunk_hdr >> 19 & 0xf;
-      if (src_end - src < src_used) return -1;
-      if (src_used < dst_count) {
-        const int temp_usage = std::min(2 * dst_count + 32 + 0x4000, 0x40000); // Tans Lut may need upwards of 16k of temp storage
-        if (mode > 1 || src_used < 10) return -1;
-        if (!Mermaid_ReadLzTable(src, src + src_used, dst,
-          dst_count, dst - dec->dst, temp + sizeof(MermaidLzTable),
-          temp + temp_usage, (MermaidLzTable*)temp)) return -1;
-        if (!Mermaid_ProcessLzRuns(mode, src, src + src_used, dst,
-          dst_count, dst - dec->dst, dst_end, (MermaidLzTable*)temp)) return -1;
-      } else if (src_used > dst_count || mode != 0) {
-        return -1;
-      } else {
-        memmove(dst, src, dst_count);
-      }
       src += src_used;
     }
     dst += dst_count;
@@ -3932,9 +3855,10 @@ void Kraken_CopyWholeMatch(byte *dst, const uint32 offset, const size_t length) 
 }
 
 namespace {
-bool step_ret(KrakenDecoder *dec, u64 src_used, u64 dst_used) {
+bool step_ret(KrakenDecoder *dec, const u64 src_used, const u64 dst_used) {
   dec->src += src_used;
   dec->src_len -= src_used;
+  dec->dst1 += dst_used;
   dec->offset += dst_used;
   dec->dst_len -= dst_used;
   return src_used > 0;
@@ -4055,13 +3979,13 @@ bool step(KrakenDecoder *dec) {
 }
 
 int Kraken_Decompress(uint8_t const* src, const size_t src_len, byte *dst, const size_t dst_len) {
-  KrakenDecoder *dec = Kraken_Create(src, src_len, dst, (u32)dst_len);
+  KrakenDecoder *dec = Kraken_Create(src, (u32)src_len, dst, (u32)dst_len);
   while (dec->dst_len != 0)
     if (!step(dec)) goto FAIL;
   if (dec->src_len != 0)
     goto FAIL;
   Kraken_Destroy(dec);
-  return dec->offset;
+  return dec->dst1 - dst;
 FAIL:
   Kraken_Destroy(dec);
   return -1;
