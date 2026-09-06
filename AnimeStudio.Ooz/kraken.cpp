@@ -3280,10 +3280,11 @@ void Mermaid_CombineOffs16(uint16 *dst, const size_t size, const uint8 *lo, cons
 
 bool Mermaid_ReadLzTable(
     const byte *src, const byte *src_end,
-    byte *dst, const int dst_size, const int64 offset,
-    byte *scratch, byte *scratch_end,
-    MermaidLzTable *lz
+    byte *dst, const u32 dst_size, const int64 offset,
+    byte *scratch, MermaidLzTable *lz
 ) {
+  const int temp_usage = std::min<u32>(2 * dst_size + 32 + 0x4000, 0x40000);
+  byte *scratch_end = scratch + temp_usage;
   if (offset == 0) {
     COPY_64(dst, src)
     dst += 8;
@@ -3316,16 +3317,13 @@ bool Mermaid_ReadLzTable(
   if (dst_size <= 0x10000) {
     lz->cmd_stream_2_offs = decode_count;
   } else {
-    if (src_end - src < 2)
-      return false;
+    if (src_end - src < 2) return false;
     lz->cmd_stream_2_offs = *(uint16*)src;
     src += 2;
-    if (lz->cmd_stream_2_offs > lz->cmd_stream_2_offs_end)
-      return false;
+    if (lz->cmd_stream_2_offs > lz->cmd_stream_2_offs_end) return false;
   }
 
-  if (src_end - src < 2)
-    return false;
+  if (src_end - src < 2) return false;
 
   const int off16_count = *(uint16*)src;
   if (off16_count == 0xffff) {
@@ -3336,25 +3334,21 @@ bool Mermaid_ReadLzTable(
     off16_hi = scratch;
     n = Kraken_DecodeBytes(&off16_hi, src, src_end, &off16_hi_count,
       Min(scratch_end - scratch, dst_size >> 1), false, scratch, scratch_end);
-    if (n < 0)
-      return false;
+    if (n < 0) return false;
     src += n;
     scratch += off16_hi_count;
 
     off16_lo = scratch;
     n = Kraken_DecodeBytes(&off16_lo, src, src_end, &off16_lo_count,
       Min(scratch_end - scratch, dst_size >> 1), false, scratch, scratch_end);
-    if (n < 0)
-      return false;
+    if (n < 0) return false;
     src += n;
     scratch += off16_lo_count;
 
-    if (off16_lo_count != off16_hi_count)
-      return false;
+    if (off16_lo_count != off16_hi_count) return false;
     scratch = ALIGN_POINTER(scratch, 2);
     lz->off16_stream = (uint16*)scratch;
-    if (scratch + off16_lo_count * 2 > scratch_end)
-      return false;
+    if (scratch + off16_lo_count * 2 > scratch_end) return false;
     scratch += off16_lo_count * 2;
     lz->off16_stream_end = (uint16*)scratch;
     Mermaid_CombineOffs16((uint16*)lz->off16_stream, off16_lo_count, off16_lo, off16_hi);
@@ -3364,8 +3358,7 @@ bool Mermaid_ReadLzTable(
     lz->off16_stream_end = (uint16*)src;
   }
 
-  if (src_end - src < 3)
-    return false;
+  if (src_end - src < 3) return false;
   const uint32 tmp = src[0] | src[1] << 8 | src[2] << 16;
   src += 3;
 
@@ -3373,23 +3366,19 @@ bool Mermaid_ReadLzTable(
     uint32 off32_size_1 = tmp >> 12;
     uint32 off32_size_2 = tmp & 0xFFF;
     if (off32_size_1 == 4095) {
-      if (src_end - src < 2)
-        return false;
+      if (src_end - src < 2) return false;
       off32_size_1 = *(uint16*)src;
       src += 2;
     }
     if (off32_size_2 == 4095) {
-      if (src_end - src < 2)
-        return false;
+      if (src_end - src < 2) return false;
       off32_size_2 = *(uint16*)src;
       src += 2;
     }
     lz->off32_size_1 = off32_size_1;
     lz->off32_size_2 = off32_size_2;
 
-    if (scratch + 4 * (off32_size_2 + off32_size_1) + 64 > scratch_end)
-      return false;
-
+    if (scratch + 4 * (off32_size_2 + off32_size_1) + 64 > scratch_end) return false;
     scratch = ALIGN_POINTER(scratch, 4);
 
     lz->off32_stream_1 = (uint32*)scratch;
@@ -3420,8 +3409,7 @@ bool Mermaid_ReadLzTable(
       return false;
     src += n;
   } else {
-    if (scratch_end - scratch < 32)
-      return false;
+    if (scratch_end - scratch < 32) return false;
     lz->off32_size_1 = 0;
     lz->off32_size_2 = 0;
     lz->off32_stream_1 = (uint32*)scratch;
@@ -3436,7 +3424,7 @@ bool Mermaid_ReadLzTable(
   return true;
 }
 
-const byte *Mermaid_Mode0(byte *dst, const size_t dst_size, byte *dst_ptr_end, byte *dst_start,
+const byte *Mermaid_Mode0(byte *dst, const size_t dst_size,
                           const byte *src_end, MermaidLzTable *lz, int32 *saved_dist, const size_t startoff) {
   const byte *dst_end = dst + dst_size;
   const byte *cmd_stream = lz->cmd_stream;
@@ -3588,7 +3576,7 @@ const byte *Mermaid_Mode0(byte *dst, const size_t dst_size, byte *dst_ptr_end, b
   return length_stream;
 }
 
-const byte *Mermaid_Mode1(byte *dst, const size_t dst_size, byte *dst_ptr_end, byte *dst_start,
+const byte *Mermaid_Mode1(byte *dst, const size_t dst_size,
                          const byte *src_end, MermaidLzTable *lz, int32 *saved_dist, const size_t startoff) {
   const byte *dst_end = dst + dst_size;
   const byte *cmd_stream = lz->cmd_stream;
@@ -3742,53 +3730,33 @@ const byte *Mermaid_Mode1(byte *dst, const size_t dst_size, byte *dst_ptr_end, b
   return length_stream;
 }
 
-bool Mermaid_ProcessLzRuns(const int mode,
-                           const byte *src, const byte *src_end,
-                           byte *dst, size_t dst_size, const uint64 offset, byte *dst_end,
-                           MermaidLzTable *lz) {
-  
-  int iteration = 0;
-  byte *dst_start = dst - offset;
+bool Mermaid_ProcessLzRuns(const int mode, const byte *src_end, byte *dst, size_t dst_size, const uint64 offset, MermaidLzTable *lz) {
   int32 saved_dist = -8;
-  const byte *src_cur;
 
-  for (iteration = 0; iteration != 2; iteration++) {
-    size_t dst_size_cur = dst_size;
-    if (dst_size_cur > 0x10000) dst_size_cur = 0x10000;
-    
-    if (iteration == 0) {
-      lz->off32_stream = lz->off32_stream_1;
-      lz->off32_stream_end = lz->off32_stream_1 + lz->off32_size_1 * 4;
-      lz->cmd_stream_end = lz->cmd_stream + lz->cmd_stream_2_offs;
-    } else {
-      lz->off32_stream = lz->off32_stream_2;
-      lz->off32_stream_end = lz->off32_stream_2 + lz->off32_size_2 * 4;
-      lz->cmd_stream_end = lz->cmd_stream + lz->cmd_stream_2_offs_end;
-      lz->cmd_stream += lz->cmd_stream_2_offs;
-    }
-
-    if (mode == 0) {
-      src_cur = Mermaid_Mode0(dst, dst_size_cur, dst_end, dst_start, src_end, lz, &saved_dist, 
-        (offset == 0) && (iteration == 0) ? 8 : 0);
-    } else {
-      src_cur = Mermaid_Mode1(dst, dst_size_cur, dst_end, dst_start, src_end, lz, &saved_dist,
-        (offset == 0) && (iteration == 0) ? 8 : 0);
-    }
-    if (src_cur == nullptr)
-      return false;
-
-    dst += dst_size_cur;
-    dst_size -= dst_size_cur;
-    if (dst_size == 0)
-      break;
-  }
-
-  if (src_cur != src_end)
-    return false;
-
-  return true;
+  // iteration 1
+  const size_t dst_size_cur0 = std::min<size_t>(dst_size, 0x10000);
+  lz->off32_stream = lz->off32_stream_1;
+  lz->off32_stream_end = lz->off32_stream_1 + lz->off32_size_1 * 4;
+  lz->cmd_stream_end = lz->cmd_stream + lz->cmd_stream_2_offs;
+  const byte* src_cur = mode == 0
+      ? Mermaid_Mode0(dst, dst_size_cur0, src_end, lz, &saved_dist, offset == 0 ? 8 : 0)
+      : Mermaid_Mode1(dst, dst_size_cur0, src_end, lz, &saved_dist, offset == 0 ? 8 : 0);
+  if (src_cur == nullptr) return false;
+  dst_size -= dst_size_cur0;
+  if (dst_size == 0) return src_cur == src_end;
+  
+  // iteration 2
+  const size_t dst_size_cur1 = std::min<size_t>(dst_size, 0x10000);
+  lz->off32_stream = lz->off32_stream_2;
+  lz->off32_stream_end = lz->off32_stream_2 + lz->off32_size_2 * 4;
+  lz->cmd_stream_end = lz->cmd_stream + lz->cmd_stream_2_offs_end;
+  lz->cmd_stream += lz->cmd_stream_2_offs;
+  src_cur = mode == 0
+      ? Mermaid_Mode0(dst + dst_size_cur0, dst_size_cur1, src_end, lz, &saved_dist, 0)
+      : Mermaid_Mode1(dst + dst_size_cur0, dst_size_cur1, src_end, lz, &saved_dist, 0);
+  if (src_cur == nullptr) return false;
+  return src_cur == src_end;
 }
-
 
 static int Mermaid_DecodeQuantum(const KrakenDecoder *dec, const uint32 compressed_size) {
   byte* dst = dec->dst + dec->offset;
@@ -3800,7 +3768,7 @@ static int Mermaid_DecodeQuantum(const KrakenDecoder *dec, const uint32 compress
   const byte *src_in = src;
 
   while (dst_end - dst != 0) {
-    const u32 dst_count = std::min((u32)(dst_end - dst), (u32)0x20000);
+    const u32 dst_count = std::min<u32>((u32)(dst_end - dst), 0x20000);
     if (src_end - src < 4) return -1;
     const int chunk_hdr = src[0] << 16 | src[1] << 8 | src[2];
     if (chunk_hdr & 0x800000) { //「?.......|........|........」
@@ -3812,11 +3780,10 @@ static int Mermaid_DecodeQuantum(const KrakenDecoder *dec, const uint32 compress
         if (src_used > dst_count || mode != 0) return -1;
         memmove(dst, src, dst_count);
       } else {
-        const int temp_usage = std::min(2 * dst_count + 32 + 0x4000, (u32)0x40000);
         // Tans Lut may need upwards of 16k of temp storage
         if (mode > 1 || src_used < 10) return -1;
-        if (!Mermaid_ReadLzTable(src, src + src_used, dst, dst_count, dst - dec->dst, temp + sizeof(MermaidLzTable), temp + temp_usage, (MermaidLzTable *)temp)) return -1;
-        if (!Mermaid_ProcessLzRuns(mode, src, src + src_used, dst, dst_count, dst - dec->dst, dst_end, (MermaidLzTable *)temp)) return -1;
+        if (!Mermaid_ReadLzTable(src, src + src_used, dst, dst_count, dst - dec->dst, temp + sizeof(MermaidLzTable), (MermaidLzTable *)temp)) return -1;
+        if (!Mermaid_ProcessLzRuns(mode, src + src_used, dst, dst_count, dst - dec->dst, (MermaidLzTable *)temp)) return -1;
       }
       src += src_used;
     } else {
