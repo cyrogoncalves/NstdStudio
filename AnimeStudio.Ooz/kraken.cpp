@@ -3769,45 +3769,36 @@ bool Mermaid_ProcessLzRuns(const int mode, const byte *src_end, byte *dst, size_
 }
 
 bool Mermaid_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
-  byte* dst = dec->dst + dec->offset;
   const auto dst_bytes_left = std::min<u32>(dec->dst_len, 0x40000);
-  const byte *dst_end = dst + dst_bytes_left;
-  const byte *src = dec->src;
+  const byte *dst_end = dec->dst1 + dst_bytes_left;
   const byte *src_end = dec->src + compressed_size;
-  byte *temp = dec->scratch;
-  const byte *src_in = src;
 
-  while (dst_end - dst != 0) {
-    const u32 dst_count = std::min<u32>((u32)(dst_end - dst), 0x20000);
-    if (src_end - src < 4) return false;
-    const int chunk_hdr = src[0] << 16 | src[1] << 8 | src[2];
+  while (dst_end - dec->dst1 != 0) {
+    const u32 dst_count = std::min<u32>((u32)(dst_end - dec->dst1), 0x20000);
+    if (src_end - dec->src < 4) return false;
+    const int chunk_hdr = dec->src[0] << 16 | dec->src[1] << 8 | dec->src[2];
     if (chunk_hdr & 0x800000) { //「?.......|........|........」
-      src += 3;
-      const int src_used = chunk_hdr & 0x7ffff; //「1....???|????????|????????」
-      const int mode = chunk_hdr >> 19 & 0xf; //「1????...|........|........」
-      if (src_end - src < src_used) return false;
+      dec->src += 3;
+      const int src_used = chunk_hdr & 0x7ffff; //「1....???|????????|????????」 u19
+      const int mode = chunk_hdr >> 19 & 0xf; //「1????...|........|........」 u4
+      // printf("quantum mode=%d size=%d pos=(%p)\n", mode, src_used, dec->src);
+      if (src_end - dec->src < src_used) return false;
       if (src_used >= dst_count) {
         if (src_used > dst_count || mode != 0) return false;
-        memmove(dst, src, dst_count);
-      } else {
-        // Tans Lut may need upwards of 16k of temp storage
+        memmove(dec->dst1, dec->src, dst_count);
+      } else { // Tans Lut may need upwards of 16k of temp storage
         if (mode > 1 || src_used < 10) return false;
-        if (!Mermaid_ReadLzTable(src, src_used, dst, dst_count, dst - dec->dst, temp + sizeof(MermaidLzTable), (MermaidLzTable *)temp)) return false;
-        if (!Mermaid_ProcessLzRuns(mode, src + src_used, dst, dst_count, dst - dec->dst, (MermaidLzTable *)temp)) return false;
+        if (!Mermaid_ReadLzTable(dec->src, src_used, dec->dst1, dst_count, dec->offset, dec->scratch + sizeof(MermaidLzTable), (MermaidLzTable *)dec->scratch)) return false;
+        if (!Mermaid_ProcessLzRuns(mode, dec->src + src_used, dec->dst1, dst_count, dec->offset, (MermaidLzTable *)dec->scratch)) return false;
       }
-      src += src_used;
-    } else {
-      // Stored without any match copying.
-      byte *out = dst;
+    } else { // Stored without any match copying.
       int written_bytes;
-      const int src_used = Kraken_DecodeBytes(&out, src, src_end, &written_bytes, dst_count, false, dec->scratch, dec->scratch + dec->scratch_size);
+      const int src_used = Kraken_DecodeBytes(&dec->dst1, dec->src, src_end, &written_bytes, dst_count, false, dec->scratch, dec->scratch + dec->scratch_size);
       if (src_used < 0 || written_bytes != dst_count) return false;
-      src += src_used;
     }
-    dst += dst_count;
+    dec->dst1 += dst_count;
   }
-  if (src - src_in != compressed_size) return false;
-  return step_ret(dec, src - src_in, dst_bytes_left);
+  return dec->src == src_end;
 }
 } // mermaid
 
@@ -3923,7 +3914,7 @@ bool kraken_step(KrakenDecoder *dec) {
   int n;
   switch (dec->hdr.decoder_type) {
   case 6: n = Kraken_DecodeQuantum(dec, compressed_size); break;
-  case 10: n = Mermaid_DecodeQuantum(dec, compressed_size); break;
+  case 10: return Mermaid_DecodeQuantum(dec, compressed_size);
   case 12: n = Leviathan_DecodeQuantum(dec, compressed_size); break;
   default: return false;
   }
