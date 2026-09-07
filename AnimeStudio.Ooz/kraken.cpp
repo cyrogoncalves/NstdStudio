@@ -3254,24 +3254,6 @@ int Leviathan_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
 }
 
 namespace {
-int Mermaid_DecodeFarOffsets(const byte **&src0, const byte *src_end, u32 *output, const size_t output_size, const int64 offset) {
-  const byte *src = *src0;
-  const byte *src_cur = src;
-
-  for (size_t i = 0; i != output_size; i++) {
-    if (src_end - src_cur < 3) return -1;
-    output[i] = src_cur[0] | src_cur[1] << 8 | src_cur[2] << 16; src_cur += 3;
-    if (offset < 0xc00000 - 1 && output[i] >= 0xc00000) {
-      if (src_cur == src_end) return -1;
-      output[i] += *src_cur++ << 22;
-    }
-    if (output[i] > offset) return -1;
-  }
-
-  *src0 += src_cur - src;
-  return src_cur - src;
-}
-
 void Mermaid_CombineOffs16(uint16 *dst, const size_t size, const uint8 *lo, const uint8 *hi) {
   for (size_t i = 0; i != size; i++)
     dst[i] = lo[i] + hi[i] * 256;
@@ -3395,15 +3377,24 @@ bool Mermaid_ReadLzTable(KrakenDecoder *dec, const byte *src_end, const size_t d
     scratch += 32;
 
     // decode far offsets
-    const byte** a67 = &dec->src;
-    n = Mermaid_DecodeFarOffsets(a67, src_end, lz->off32_stream_1, lz->off32_size_1, dec->offset);
-    if (n < 0)
-      return false;
-
-    const byte** a68 = &dec->src;
-    n = Mermaid_DecodeFarOffsets(a68, src_end, lz->off32_stream_2, lz->off32_size_2, dec->offset + 0x10000);
-    if (n < 0)
-      return false;
+    for (size_t i = 0; i != lz->off32_size_1; i++) {
+      if (src_end - dec->src < 3) return false;
+      lz->off32_stream_1[i] = dec->src[0] | dec->src[1] << 8 | dec->src[2] << 16; dec->src += 3;
+      if (dec->offset < 0xc00000 - 1 && lz->off32_stream_1[i] >= 0xc00000) {
+        if (dec->src == src_end) return false;
+        lz->off32_stream_1[i] += *dec->src++ << 22;
+      }
+      if (lz->off32_stream_1[i] > dec->offset) return false;
+    }
+    for (size_t i = 0; i != lz->off32_size_2; i++) {
+      if (src_end - dec->src < 3) return false;
+      lz->off32_stream_2[i] = dec->src[0] | dec->src[1] << 8 | dec->src[2] << 16; dec->src += 3;
+      if (dec->offset + 0x10000 < 0xc00000 - 1 && lz->off32_stream_2[i] >= 0xc00000) {
+        if (dec->src == src_end) return false;
+        lz->off32_stream_2[i] += *dec->src++ << 22;
+      }
+      if (lz->off32_stream_2[i] > dec->offset + 0x10000) return false;
+    }
   } else {
     if (scratch_end - scratch < 32) return false;
     lz->off32_size_1 = 0;
