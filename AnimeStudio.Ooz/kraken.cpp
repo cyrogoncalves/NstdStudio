@@ -139,7 +139,7 @@ typedef struct MermaidLzTable {
   uint32 cmd_stream_2_offs, cmd_stream_2_offs_end; // Flag offsets for next 64k chunk.
 } MermaidLzTable;
 
-
+namespace {
 typedef struct KrakenDecoder {
   u32 src_len, dst_len, offset, scratch_size;
   const byte *src;
@@ -149,6 +149,16 @@ typedef struct KrakenDecoder {
 
   KrakenHeader hdr;
 } KrakenDecoder;
+
+bool step_ret(KrakenDecoder *dec, const u64 src_used, const u64 dst_used) {
+  dec->src += src_used;
+  dec->src_len -= src_used;
+  dec->dst1 += dst_used;
+  dec->offset += dst_used;
+  dec->dst_len -= dst_used;
+  return src_used > 0;
+}
+}
 
 typedef struct BitReader {
   const byte *p, *p_end; // |p| holds the current byte and |p_end| the end of the buffer.
@@ -178,7 +188,7 @@ inline size_t Min(const size_t a, const size_t b) { return a < b ? a : b; }
 
 struct HuffRange;
 
-int Kraken_DecodeBytes(byte **output, const byte *src, const byte *src_end, int *decoded_size, size_t output_size, bool force_memmove, uint8 *scratch, uint8 *scratch_end);
+int Kraken_DecodeBytes(byte **output, const byte *src, const byte *src_end, int *decoded_size, size_t output_size, bool force_memmove, uint8 *scratch, const uint8 *scratch_end);
 int Kraken_GetBlockSize(const uint8 *src, const uint8 *src_end, int *dest_size, int dest_capacity);
 int Huff_ConvertToRanges(HuffRange *range, int num_symbols, int P, const uint8 *symlen, BitReader *bits);
 
@@ -1196,7 +1206,7 @@ static uint32 bitmasks[32] = {
 int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
                             uint8 *dst, uint8 *dst_end,
                             uint8 **array_data, int *array_lens, int array_count,
-                            int *total_size_out, bool force_memmove, uint8 *scratch, uint8 *scratch_end) {
+                            int *total_size_out, bool force_memmove, uint8 *scratch, const uint8 *scratch_end) {
   const uint8 *src_org = src;
 
   if (src_end - src < 4)
@@ -1410,7 +1420,7 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
   return src_end_actual - src_org;
 }
 
-int Krak_DecodeRecursive(const byte *src, const size_t src_size, byte *output, const int output_size, uint8 *scratch, uint8 *scratch_end) {
+int Krak_DecodeRecursive(const byte *src, const size_t src_size, byte *output, const int output_size, uint8 *scratch, const uint8 *scratch_end) {
   const uint8 *src_org = src;
   byte *output_end = output + output_size;
   const byte *src_end = src + src_size;
@@ -1448,7 +1458,7 @@ int Krak_DecodeRecursive(const byte *src, const size_t src_size, byte *output, c
   }
 }
 
-int Krak_DecodeRLE(const byte *src, const size_t src_size, byte *dst, const int dst_size, uint8 *scratch, uint8 *scratch_end) {
+int Krak_DecodeRLE(const byte *src, const size_t src_size, byte *dst, const int dst_size, uint8 *scratch, const uint8 *scratch_end) {
   if (src_size <= 1) {
     if (src_size != 1)
       return -1;
@@ -2001,22 +2011,21 @@ int Kraken_GetBlockSize(const uint8 *src, const uint8 *src_end, int *dest_size, 
 }
 
 int Kraken_DecodeBytes(byte **output, const byte *src, const byte *src_end,
-    int *decoded_size, const size_t output_size, const bool force_memmove, uint8 *scratch, uint8 *scratch_end) {
+    int *decoded_size, const size_t output_size, const bool force_memmove,
+    uint8 *scratch, const uint8 *scratch_end) {
   const byte *src_org = src;
   int src_size, dst_size;
 
-  if (src_end - src < 2)
-    return -1; // too few bytes
-
-  const int chunk_type = src[0] >> 4 & 0x7;
+  if (src_end - src < 2) return -1; // too few bytes
+  const int chunk_type = src[0] >> 4 & 0x7; //「.???....」
   if (chunk_type == 0) {
-    if (src[0] >= 0x80) {
+    if (src[0] >= 0x80) { //「?.......」
       // In this mode, memcopy stores the length in the bottom 12 bits.
-      src_size = (src[0] << 8 | src[1]) & 0xFFF;
+      src_size = (src[0] << 8 | src[1]) & 0xfff; //「1000????|????????」 u12
       src += 2;
     } else {
       if (src_end - src < 3) return -1; // too few bytes
-      src_size = src[0] << 16 | src[1] << 8 | src[2];
+      src_size = src[0] << 16 | src[1] << 8 | src[2]; //「0000..??|????????|????????」 u18
       if (src_size & ~0x3ffff) return -1; // reserved bits must not be set
       src += 3;
     }
@@ -2034,21 +2043,21 @@ int Kraken_DecodeBytes(byte **output, const byte *src, const byte *src_end,
     // short mode, 10 bit sizes
     if (src_end - src < 3) return -1; // too few bytes
     const uint32 bits = src[0] << 16 | src[1] << 8 | src[2];
-    src_size = bits & 0x3ff;
-    dst_size = src_size + (bits >> 10 & 0x3ff) + 1;
+    src_size = bits & 0x3ff; //「1.......|......??|????????」 u10
+    dst_size = src_size + (bits >> 10 & 0x3ff) + 1; //「1...????|??????..|........」 u10
     src += 3;
   } else {
     // long mode, 18 bit sizes
     if (src_end - src < 5) return -1; // too few bytes
     const uint32 bits = src[1] << 24 | src[2] << 16 | src[3] << 8 | src[4];
-    src_size = bits & 0x3ffff;
-    dst_size = ((bits >> 18 | src[0] << 14) & 0x3FFFF) + 1;
+    src_size = bits & 0x3ffff; //「0.......|........|......??|????????|????????」 u18
+    dst_size = ((bits >> 18 | src[0] << 14) & 0x3FFFF) + 1; //「0...????|????????|??????..|........|........」 u18
     if (src_size >= dst_size) return -1;
     src += 5;
   }
   if (src_end - src < src_size || dst_size > output_size) return -1;
 
-  uint8 *dst = *output;
+  u8 *dst = *output;
   if (dst == scratch) {
     if (scratch_end - scratch < dst_size) return -1;
     scratch += dst_size;
@@ -3244,7 +3253,7 @@ int Leviathan_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
   return src - src_in;
 }
 
-
+namespace {
 int Mermaid_DecodeFarOffsets(const byte *src, const byte *src_end, uint32 *output, const size_t output_size, const int64 offset) {
   const byte *src_cur = src;
   size_t i;
@@ -3279,12 +3288,13 @@ void Mermaid_CombineOffs16(uint16 *dst, const size_t size, const uint8 *lo, cons
 }
 
 bool Mermaid_ReadLzTable(
-    const byte *src, const byte *src_end,
+    const byte *src, const int src_used,
     byte *dst, const u32 dst_size, const int64 offset,
     byte *scratch, MermaidLzTable *lz
 ) {
+  const byte *src_end = src + src_used;
   const int temp_usage = std::min<u32>(2 * dst_size + 32 + 0x4000, 0x40000);
-  byte *scratch_end = scratch + temp_usage;
+  const byte *scratch_end = scratch + temp_usage;
   if (offset == 0) {
     COPY_64(dst, src)
     dst += 8;
@@ -3758,10 +3768,10 @@ bool Mermaid_ProcessLzRuns(const int mode, const byte *src_end, byte *dst, size_
   return src_cur == src_end;
 }
 
-static int Mermaid_DecodeQuantum(const KrakenDecoder *dec, const uint32 compressed_size) {
+bool Mermaid_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
   byte* dst = dec->dst + dec->offset;
-  const auto dst_bytes_left = std::min((u32)0x40000, dec->dst_len);
-  byte *dst_end = dst + dst_bytes_left;
+  const auto dst_bytes_left = std::min<u32>(dec->dst_len, 0x40000);
+  const byte *dst_end = dst + dst_bytes_left;
   const byte *src = dec->src;
   const byte *src_end = dec->src + compressed_size;
   byte *temp = dec->scratch;
@@ -3769,21 +3779,21 @@ static int Mermaid_DecodeQuantum(const KrakenDecoder *dec, const uint32 compress
 
   while (dst_end - dst != 0) {
     const u32 dst_count = std::min<u32>((u32)(dst_end - dst), 0x20000);
-    if (src_end - src < 4) return -1;
+    if (src_end - src < 4) return false;
     const int chunk_hdr = src[0] << 16 | src[1] << 8 | src[2];
     if (chunk_hdr & 0x800000) { //「?.......|........|........」
       src += 3;
       const int src_used = chunk_hdr & 0x7ffff; //「1....???|????????|????????」
       const int mode = chunk_hdr >> 19 & 0xf; //「1????...|........|........」
-      if (src_end - src < src_used) return -1;
+      if (src_end - src < src_used) return false;
       if (src_used >= dst_count) {
-        if (src_used > dst_count || mode != 0) return -1;
+        if (src_used > dst_count || mode != 0) return false;
         memmove(dst, src, dst_count);
       } else {
         // Tans Lut may need upwards of 16k of temp storage
-        if (mode > 1 || src_used < 10) return -1;
-        if (!Mermaid_ReadLzTable(src, src + src_used, dst, dst_count, dst - dec->dst, temp + sizeof(MermaidLzTable), (MermaidLzTable *)temp)) return -1;
-        if (!Mermaid_ProcessLzRuns(mode, src + src_used, dst, dst_count, dst - dec->dst, (MermaidLzTable *)temp)) return -1;
+        if (mode > 1 || src_used < 10) return false;
+        if (!Mermaid_ReadLzTable(src, src_used, dst, dst_count, dst - dec->dst, temp + sizeof(MermaidLzTable), (MermaidLzTable *)temp)) return false;
+        if (!Mermaid_ProcessLzRuns(mode, src + src_used, dst, dst_count, dst - dec->dst, (MermaidLzTable *)temp)) return false;
       }
       src += src_used;
     } else {
@@ -3791,13 +3801,15 @@ static int Mermaid_DecodeQuantum(const KrakenDecoder *dec, const uint32 compress
       byte *out = dst;
       int written_bytes;
       const int src_used = Kraken_DecodeBytes(&out, src, src_end, &written_bytes, dst_count, false, dec->scratch, dec->scratch + dec->scratch_size);
-      if (src_used < 0 || written_bytes != dst_count) return -1;
+      if (src_used < 0 || written_bytes != dst_count) return false;
       src += src_used;
     }
     dst += dst_count;
   }
-  return src - src_in;
+  if (src - src_in != compressed_size) return false;
+  return step_ret(dec, src - src_in, dst_bytes_left);
 }
+} // mermaid
 
 int LZNA_DecodeQuantum(byte *dst, byte *dst_end, byte *dst_start,
                        const byte *src, const byte *src_end,
@@ -3822,15 +3834,6 @@ void Kraken_CopyWholeMatch(byte *dst, const uint32 offset, const size_t length) 
 }
 
 namespace {
-bool step_ret(KrakenDecoder *dec, const u64 src_used, const u64 dst_used) {
-  dec->src += src_used;
-  dec->src_len -= src_used;
-  dec->dst1 += dst_used;
-  dec->offset += dst_used;
-  dec->dst_len -= dst_used;
-  return src_used > 0;
-}
-
 bool lzna_step(KrakenDecoder *dec) {
   const auto dst_bytes_left = std::min((u32)0x4000, dec->dst_len);
   const byte *src_in = dec->src;
@@ -3932,42 +3935,42 @@ bool kraken_step(KrakenDecoder *dec) {
 bool step(KrakenDecoder *dec) {
   if ((dec->offset & 0x3ffff) == 0) {
     const int b0 = dec->src[0], b1 = dec->src[1]; dec->src += 2;
-    if ((b0 & 0x3f) != 0x0c) return false; // 「..001100」
-    dec->hdr.uncompressed = (b0 >> 6) & 1; // 「.?......」
-    dec->hdr.restart_decoder = (b0 >> 7) & 1; // 「?.......」
-    dec->hdr.decoder_type = b1 & 0x7f; // 「.???????」
-    dec->hdr.use_checksums = !!(b1 >> 7); // 「?.......」
+    if ((b0 & 0x3f) != 0x0c) return false; // 「..001100|........」
+    dec->hdr.uncompressed = (b0 >> 6) & 1; // 「.?......|........」
+    dec->hdr.restart_decoder = (b0 >> 7) & 1; // 「?.......|........」
+    dec->hdr.decoder_type = b1 & 0x7f; // 「........|.???????」
+    dec->hdr.use_checksums = !!(b1 >> 7); // 「........|?.......」
     // printf("hdr: %d %d\n", b0, b1);
   }
 
   const auto t = dec->hdr.decoder_type;
   return t == 6 || t == 10 || t == 12 ? kraken_step(dec) : t == 5 || t == 11 ? lzna_step(dec) : false;
 }
-}
 
-int Kraken_Decompress(uint8_t const* src, const size_t src_len, byte *dst, const size_t dst_len) {
+int kraken_decompress(uint8_t const* src, const size_t src_len, byte *dst, const size_t dst_len) {
   KrakenDecoder *dec = Kraken_Create(src, (u32)src_len, dst, (u32)dst_len);
   while (dec->dst_len != 0)
     if (!step(dec)) goto FAIL;
   if (dec->src_len != 0)
     goto FAIL;
   Kraken_Destroy(dec);
-  return dec->dst1 - dst;
+  return (int)(dec->dst1 - dst);
 FAIL:
   Kraken_Destroy(dec);
   return -1;
+}
 }
 
 extern "C" {
     OOZ_DLL_PUBLIC int Ooz_Decompress(uint8_t const* src_buf, const int src_len, uint8_t* dst, const size_t dst_size,
         int, int, int, uint8_t*, size_t, void*, void*, void*, size_t, int) {
-        return Kraken_Decompress(src_buf, src_len, dst, dst_size);
+        return kraken_decompress(src_buf, src_len, dst, dst_size);
     }
 }
 
 #if !OOZ_BUILD_DLL
 
-// The decompressor will write outside of the target buffer.
+// The decompressor will write outside the target buffer.
 #define SAFE_SPACE 64
 
 void error(const char *s, const char *curfile = NULL) {
@@ -4244,7 +4247,7 @@ int main(int argc, char *argv[]) {
       if (arg_dll) {
         outbytes = OodLZ_Decompress(input + hdrsize, input_size - hdrsize, output, unpacked_size, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
       } else {
-        outbytes = Kraken_Decompress(input + hdrsize, input_size - hdrsize, output, unpacked_size);
+        outbytes = kraken_decompress(input + hdrsize, input_size - hdrsize, output, unpacked_size);
       }
       if (outbytes != unpacked_size)
         error("decompress error", curfile);
