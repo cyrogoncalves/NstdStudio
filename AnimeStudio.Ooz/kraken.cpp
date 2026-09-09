@@ -3785,17 +3785,6 @@ bool Mermaid_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
 }
 } // mermaid
 
-int LZNA_DecodeQuantum(byte *dst, byte *dst_end, byte *dst_start,
-                       const byte *src, const byte *src_end,
-                       struct LznaState *lut);
-void LZNA_InitLookup(LznaState *lut);
-
-struct BitknitState;
-
-void BitknitState_Init(BitknitState *bk);
-size_t Bitknit_Decode(const byte *src, const byte *src_end, byte *dst, byte *dst_end, byte *dst_start, BitknitState *bk);
-
-
 void Kraken_CopyWholeMatch(byte *dst, const uint32 offset, const size_t length) {
   size_t i = 0;
   byte *src = dst - offset;
@@ -3808,85 +3797,21 @@ void Kraken_CopyWholeMatch(byte *dst, const uint32 offset, const size_t length) 
 }
 
 namespace {
-bool lzna_step(KrakenDecoder *dec) {
-  const auto dst_bytes_left = std::min((u32)0x4000, dec->dst_len);
-  const byte *src_in = dec->src;
-  const byte *src_end = dec->src + dec->src_len;
-  byte* dst = dec->dst + dec->offset;
-  int n;
-  const u64 src_used = dec->src - src_in;
-
-  if (dec->hdr.uncompressed) {
-    if (src_end - dec->src < dst_bytes_left) return false;
-    memmove(dst, dec->src, dst_bytes_left);
-    return step_ret(dec, src_used + dst_bytes_left, dst_bytes_left);
-  }
-
-  uint32 v = dec->src[0] << 8 | dec->src[1]; dec->src += 2;
-  const u32 compressed_size = (v & 0x3fff) + 1; // 「..??????|????????」
-  if (compressed_size == 0x4000) {
-    v >>= 14;
-    if (v == 0) {
-      u32 whole_match_distance; // Whether the whole block matched a previous block
-      dec->src = LZNA_ParseWholeMatchInfo(dec->src, &whole_match_distance);
-      if (whole_match_distance > dec->offset) return false;
-      Kraken_CopyWholeMatch(dst, whole_match_distance, dst_bytes_left);
-      return step_ret(dec, src_used, dst_bytes_left);
-    }
-    if (v == 1) {
-      // memset
-      memset(dst, dec->src[0], dst_bytes_left);
-      dec->src += 1;
-      return step_ret(dec, src_used, dst_bytes_left);
-    }
-    if (v == 2) {
-      // uncompressed
-      memmove(dst, dec->src, dst_bytes_left);
-      return step_ret(dec, src_used + dst_bytes_left, dst_bytes_left);
-    }
-    return false;
-  }
-  if (!dec->hdr.use_checksums) dec->src += 3; // checksum not implemented
-  if (dec->src + compressed_size > src_end) return false; // Too few bytes in buffer to make any progress?
-  if (compressed_size > dst_bytes_left) return false;
-
-  switch (dec->hdr.decoder_type) {
-  case 5:
-    if (dec->hdr.restart_decoder) {
-      dec->hdr.restart_decoder = false;
-      LZNA_InitLookup(reinterpret_cast<LznaState *>(dec->scratch));
-    }
-    n = LZNA_DecodeQuantum(dst, dst + dst_bytes_left, dec->dst, dec->src, dec->src + compressed_size, reinterpret_cast<LznaState *>(dec->scratch));
-    break;
-  case 11:
-    if (dec->hdr.restart_decoder) {
-      dec->hdr.restart_decoder = false;
-      BitknitState_Init(reinterpret_cast<BitknitState *>(dec->scratch));
-    }
-    n = static_cast<int>(Bitknit_Decode(dec->src, dec->src + compressed_size, dst, dst + dst_bytes_left, dec->dst, reinterpret_cast<BitknitState *>(dec->scratch)));
-    break;
-  default: return false;
-  }
-
-  if (n != compressed_size) return false;
-  return step_ret(dec, src_used + n, dst_bytes_left);
-}
-
 bool kraken_step(KrakenDecoder *dec) {
   const auto dst_bytes_left = std::min((u32)0x40000, dec->dst_len);
-  byte* dst = dec->dst + dec->offset;
 
   if (dec->hdr.uncompressed) {
     if (dec->src_len < dst_bytes_left) return false;
-    memmove(dst, dec->src, dst_bytes_left);
+    memmove(dec->dst1, dec->src, dst_bytes_left);
     return step_ret(dec, dst_bytes_left, dst_bytes_left);
   }
 
   const u32 v = dec->src[0] << 16 | dec->src[1] << 8 | dec->src[2]; dec->src += 3;
   const u32 compressed_size = (v & 0x3ffff) + 1;  // 「......??|????????|????????」
   if (compressed_size == 0x40000) {
+    printf("memset compressed_size=%u type=%d\n", compressed_size, dec->hdr.decoder_type);
     if (v >> 18 != 1) return false; // 「??????11|11111111|11111111」
-    memset(dst, dec->src[0], dst_bytes_left);
+    memset(dec->dst1, dec->src[0], dst_bytes_left);
     dec->src += 1;
     return step_ret(dec, 0, dst_bytes_left);
   }
@@ -3905,7 +3830,6 @@ bool kraken_step(KrakenDecoder *dec) {
   return step_ret(dec, n, dst_bytes_left);
 }
 
-
 bool step(KrakenDecoder *dec) {
   if ((dec->offset & 0x3ffff) == 0) {
     const int b0 = dec->src[0], b1 = dec->src[1]; dec->src += 2;
@@ -3917,8 +3841,7 @@ bool step(KrakenDecoder *dec) {
     // printf("hdr: %d %d\n", b0, b1);
   }
 
-  const auto t = dec->hdr.decoder_type;
-  return t == 6 || t == 10 || t == 12 ? kraken_step(dec) : t == 5 || t == 11 ? lzna_step(dec) : false;
+  return kraken_step(dec);
 }
 
 int kraken_decompress(uint8_t const* src, const size_t src_len, byte *dst, const size_t dst_len) {
