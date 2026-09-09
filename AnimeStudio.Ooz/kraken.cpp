@@ -2593,13 +2593,13 @@ struct LeviathanLzTable {
   int offs_stream_size;
   int *len_stream;
   int len_stream_size;
-  uint8 *lit_stream[16];
   int lit_stream_size[16];
   int lit_stream_total;
+  int cmd_stream_size;
+  uint8 *lit_stream[16];
   uint8 *multi_cmd_ptr[8];
   uint8 *multi_cmd_end[8];
   uint8 *cmd_stream;
-  int cmd_stream_size;
 };
 
 bool Leviathan_ReadLzTable(const int chunk_type,
@@ -2609,12 +2609,7 @@ bool Leviathan_ReadLzTable(const int chunk_type,
   byte *packed_offs_stream, *packed_len_stream, *out;
   int decode_count, n;
 
-  if (chunk_type > 5)
-    return false;
-
-  if (src_end - src < 13)
-    return false;
-
+  if (chunk_type > 5 || src_end - src < 13) return false;
   if (offset == 0) {
     COPY_64(dst, src)
     dst += 8;
@@ -2623,8 +2618,6 @@ bool Leviathan_ReadLzTable(const int chunk_type,
 
   int offs_scaling = 0;
   uint8 *packed_offs_stream_extra = nullptr;
-
-
   const int offs_stream_limit = dst_size / 3;
 
   if (!(src[0] & 0x80)) {
@@ -2632,8 +2625,7 @@ bool Leviathan_ReadLzTable(const int chunk_type,
     packed_offs_stream = scratch;
     n = Kraken_DecodeBytes(&packed_offs_stream, src, src_end, &lztable->offs_stream_size,
                            Min(scratch_end - scratch, offs_stream_limit), false, scratch, scratch_end);
-    if (n < 0)
-      return false;
+    if (n < 0) return false;
     src += n;
     scratch += lztable->offs_stream_size;
   } else {
@@ -2645,8 +2637,7 @@ bool Leviathan_ReadLzTable(const int chunk_type,
     packed_offs_stream = scratch;
     n = Kraken_DecodeBytes(&packed_offs_stream, src, src_end, &lztable->offs_stream_size,
                            Min(scratch_end - scratch, offs_stream_limit), false, scratch, scratch_end);
-    if (n < 0)
-      return false;
+    if (n < 0) return false;
     src += n;
     scratch += lztable->offs_stream_size;
 
@@ -2654,8 +2645,7 @@ bool Leviathan_ReadLzTable(const int chunk_type,
       packed_offs_stream_extra = scratch;
       n = Kraken_DecodeBytes(&packed_offs_stream_extra, src, src_end, &decode_count,
                              Min(scratch_end - scratch, offs_stream_limit), false, scratch, scratch_end);
-      if (n < 0 || decode_count != lztable->offs_stream_size)
-        return false;
+      if (n < 0 || decode_count != lztable->offs_stream_size) return false;
       src += n;
       scratch += decode_count;
     }
@@ -2665,8 +2655,7 @@ bool Leviathan_ReadLzTable(const int chunk_type,
   packed_len_stream = scratch;
   n = Kraken_DecodeBytes(&packed_len_stream, src, src_end, &lztable->len_stream_size,
                          Min(scratch_end - scratch, dst_size / 5), false, scratch, scratch_end);
-  if (n < 0)
-    return false;
+  if (n < 0) return false;
   src += n;
   scratch += lztable->len_stream_size;
 
@@ -2680,16 +2669,14 @@ bool Leviathan_ReadLzTable(const int chunk_type,
   lztable->len_stream = (int*)scratch;
   scratch += lztable->len_stream_size * 4;
 
-  if (scratch > scratch_end)
-    return false;
+  if (scratch > scratch_end) return false;
 
   if (chunk_type <= 1) {
     // Decode lit stream, bounded by dst_size
     out = scratch;
     n = Kraken_DecodeBytes(&out, src, src_end, &decode_count, Min(scratch_end - scratch, dst_size),
                            true, scratch, scratch_end);
-    if (n < 0)
-      return false;
+    if (n < 0) return false;
     src += n;
     lztable->lit_stream[0] = out;
     lztable->lit_stream_size[0] = decode_count;
@@ -2699,36 +2686,30 @@ bool Leviathan_ReadLzTable(const int chunk_type,
     n = Kraken_DecodeMultiArray(src, src_end, scratch, scratch_end, lztable->lit_stream,
                                 lztable->lit_stream_size, array_count, &decode_count,
                                 true, scratch, scratch_end);
-    if (n < 0)
-      return false;
+    if (n < 0) return false;
     src += n;
   }
   scratch += decode_count;
   lztable->lit_stream_total = decode_count;
-
-  if (src >= src_end)
-    return false;
+  if (src >= src_end) return false;
 
   if (!(src[0] & 0x80)) {
     // Decode command stream, bounded by dst_size
     out = scratch;
     n = Kraken_DecodeBytes(&out, src, src_end, &decode_count, Min(scratch_end - scratch, dst_size),
                            true, scratch, scratch_end);
-    if (n < 0)
-      return false;
+    if (n < 0) return false;
     src += n;
     lztable->cmd_stream = out;
     lztable->cmd_stream_size = decode_count;
     scratch += decode_count;
   } else {
-    if (src[0] != 0x83)
-      return false;
+    if (src[0] != 0x83) return false;
     src++;
     int multi_cmd_lens[8];
     n = Kraken_DecodeMultiArray(src, src_end, scratch, scratch_end, lztable->multi_cmd_ptr,
                                 multi_cmd_lens, 8, &decode_count, true, scratch, scratch_end);
-    if (n < 0)
-      return false;
+    if (n < 0) return false;
     src += n;
     for (size_t i = 0; i < 8; i++)
       lztable->multi_cmd_end[i] = lztable->multi_cmd_ptr[i] + multi_cmd_lens[i];
@@ -2737,10 +2718,7 @@ bool Leviathan_ReadLzTable(const int chunk_type,
     lztable->cmd_stream_size = decode_count;
     scratch += decode_count;
   }
-
-  if (dst_size > scratch_end - scratch)
-    return false;
-
+  if (dst_size > scratch_end - scratch) return false;
 
   return Kraken_UnpackOffsets(src, src_end, packed_offs_stream, packed_offs_stream_extra,
                               lztable->offs_stream_size, offs_scaling,
@@ -2787,13 +2765,13 @@ struct LeviathanModeRaw {
     if (final_len >= 64) {
       do {
         COPY_64_BYTES(dst, lit_stream)
-        dst += 64, lit_stream += 64, final_len -= 64;
+        dst += 64; lit_stream += 64; final_len -= 64;
       } while (final_len >= 64);
     }
     if (final_len >= 8) {
       do {
         COPY_64(dst, lit_stream)
-        dst += 8, lit_stream += 8, final_len -= 8;
+        dst += 8; lit_stream += 8; final_len -= 8;
       } while (final_len >= 8);
     }
     if (final_len > 0) {
@@ -2841,7 +2819,7 @@ struct LeviathanModeSub {
     if (final_len >= 8) {
       do {
         COPY_64_ADD(dst, lit_stream, &dst[last_offset]);
-        dst += 8, lit_stream += 8, final_len -= 8;
+        dst += 8; lit_stream += 8; final_len -= 8;
       } while (final_len >= 8);
     }
     if (final_len > 0) {
@@ -2862,8 +2840,7 @@ struct LeviathanModeLamSub {
 
   finline bool CopyLiterals(const uint32 cmd, uint8 *&dst, const int *&len_stream, const uint8 *match_zone_end, const size_t last_offset) {
     const uint32 lit_cmd = cmd & 0x18;
-    if (!lit_cmd)
-      return true;
+    if (!lit_cmd) return true;
 
     uint32 litlen = lit_cmd >> 3;
     // use cmov
@@ -2872,10 +2849,9 @@ struct LeviathanModeLamSub {
     len_stream = litlen == 3 ? next_len_stream : len_stream;
     litlen = litlen == 3 ? len_stream_value : litlen;
        
-    if (litlen-- == 0)
-      return false; // lamsub mode requires one literal
+    if (litlen-- == 0) return false; // lamsub mode requires one literal
 
-    dst[0] = *lam_lit_stream++ + dst[last_offset], dst++;
+    dst[0] = *lam_lit_stream++ + dst[last_offset]; dst++;
 
     COPY_64_ADD(dst, lit_stream, &dst[last_offset]);
     if (litlen > 8) {
@@ -2887,7 +2863,7 @@ struct LeviathanModeLamSub {
             return false;  // out of bounds
           do {
             COPY_64_ADD(dst + 24, lit_stream + 24, &dst[last_offset + 24]);
-            litlen -= 8, dst += 8, lit_stream += 8;
+            litlen -= 8; dst += 8; lit_stream += 8;
           } while (litlen > 24);
         }
       }
@@ -2898,13 +2874,13 @@ struct LeviathanModeLamSub {
   }
 
   finline void CopyFinalLiterals(uint32 final_len, uint8 *&dst, const size_t last_offset) {
-    dst[0] = *lam_lit_stream++ + dst[last_offset], dst++;
+    dst[0] = *lam_lit_stream++ + dst[last_offset]; dst++;
     final_len -= 1;
 
     if (final_len >= 8) {
       do {
         COPY_64_ADD(dst, lit_stream, &dst[last_offset]);
-        dst += 8, lit_stream += 8, final_len -= 8;
+        dst += 8; lit_stream += 8; final_len -= 8;
       } while (final_len >= 8);
     }
     if (final_len > 0) {
@@ -2932,7 +2908,7 @@ struct LeviathanModeSubAnd3 {
         return false;
       while (litlen) {
         *dst = *lit_stream[(uintptr_t)dst & MASK]++ + dst[last_offset];
-        dst++, litlen--;
+        dst++; litlen--;
       }
     } else if (lit_cmd) {
       *dst = *lit_stream[(uintptr_t)dst & MASK]++ + dst[last_offset];
@@ -2971,7 +2947,7 @@ struct LeviathanModeSubAndF {
         return false;
       while (litlen) {
         *dst = *lit_stream[(uintptr_t)dst & MASK]++ + dst[last_offset];
-        dst++, litlen--;
+        dst++; litlen--;
       }
     } else if (lit_cmd) {
       *dst = *lit_stream[(uintptr_t)dst & MASK]++ + dst[last_offset];
@@ -3044,9 +3020,9 @@ struct LeviathanModeO1 {
   }
 };
 
-template<typename Mode, bool MultiCmd>
+template<typename Mode>
 bool Leviathan_ProcessLz(LeviathanLzTable *lzt, uint8 *dst,
-                         uint8 *dst_start, uint8 *dst_end, uint8 *window_base) {
+                         uint8 *dst_start, uint8 *dst_end, uint8 *window_base, bool multi_cmd) {
   const uint8 *cmd_stream = lzt->cmd_stream,
               *cmd_stream_end = cmd_stream + lzt->cmd_stream_size;
   const int *len_stream = lzt->len_stream;
@@ -3067,7 +3043,7 @@ bool Leviathan_ProcessLz(LeviathanLzTable *lzt, uint8 *dst,
 
   uint32 cmd_stream_left;
   const uint8 *multi_cmd_stream[8], **cmd_stream_ptr;
-  if (MultiCmd) {
+  if (multi_cmd) {
     for (size_t i = 0; i != 8; i++)
       multi_cmd_stream[i] = lzt->multi_cmd_ptr[i - (uintptr_t)dst_start & 7];
     cmd_stream_left = lzt->cmd_stream_size;
@@ -3078,7 +3054,7 @@ bool Leviathan_ProcessLz(LeviathanLzTable *lzt, uint8 *dst,
   for(;;) {
     uint32 cmd;
     
-    if (!MultiCmd) {
+    if (!multi_cmd) {
       if (cmd_stream >= cmd_stream_end)
         break;
       cmd = *cmd_stream++;
@@ -3092,12 +3068,8 @@ bool Leviathan_ProcessLz(LeviathanLzTable *lzt, uint8 *dst,
 
     const uint32 offs_index = cmd >> 5;
     uint32 matchlen = (cmd & 7) + 2;
-
     recent_offs[15] = *offs_stream;
-
-    if (!mode.CopyLiterals(cmd, dst, len_stream, match_zone_end, offset))
-      return false;
-
+    if (!mode.CopyLiterals(cmd, dst, len_stream, match_zone_end, offset)) return false;
     offset = recent_offs[static_cast<size_t>(offs_index) + 8];
 
     // Permute the recent offsets table
@@ -3112,37 +3084,31 @@ bool Leviathan_ProcessLz(LeviathanLzTable *lzt, uint8 *dst,
     copyfrom = dst + offset;
 
     if (matchlen == 9) {
-      if (len_stream >= len_stream_end)
-        return false;  // len stream empty
+      if (len_stream >= len_stream_end) return false;  // len stream empty
       matchlen = *--len_stream_end + 6;
       COPY_64(dst, copyfrom)
       COPY_64(dst + 8, copyfrom + 8)
       uint8 *next_dst = dst + matchlen;
-      if (MultiCmd)
+      if (multi_cmd)
         cmd_stream = *(cmd_stream_ptr = &multi_cmd_stream[(uintptr_t)next_dst & 7]);
       if (matchlen > 16) {
-        if (matchlen > static_cast<uintptr_t>(dst_end - 8 - dst))
-          return false;  // no space in buf
+        if (matchlen > static_cast<uintptr_t>(dst_end - 8 - dst)) return false;  // no space in buf
         COPY_64(dst + 16, copyfrom + 16)
         do {
           COPY_64(dst + 24, copyfrom + 24)
-          matchlen -= 8;
-          dst += 8;
-          copyfrom += 8;
+          matchlen -= 8; dst += 8; copyfrom += 8;
         } while (matchlen > 24);
       }
       dst = next_dst;
     } else {
       COPY_64(dst, copyfrom)
       dst += matchlen;
-      if (MultiCmd)
+      if (multi_cmd)
         cmd_stream = *(cmd_stream_ptr = &multi_cmd_stream[(uintptr_t)dst & 7]);
     }
   }
 
-  // check for incorrect input
-  if (offs_stream != offs_stream_end || len_stream != len_stream_end)
-    return false;
+  if (offs_stream != offs_stream_end || len_stream != len_stream_end) return false; // check for incorrect input
 
   // copy final literals
   if (dst < dst_end) {
@@ -3157,45 +3123,17 @@ bool Leviathan_ProcessLzRuns(const int chunk_type, byte *dst, const int dst_size
   uint8 *dst_cur = dst + (offset == 0 ? 8 : 0);
   uint8 *dst_end = dst + dst_size;
   uint8 *dst_start = dst - offset;
-  
-  if (lzt->cmd_stream != nullptr) {
-    // single cmd mode
-    switch (chunk_type) {
-    case 0:
-      return Leviathan_ProcessLz<LeviathanModeSub, false>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 1:
-      return Leviathan_ProcessLz<LeviathanModeRaw, false>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 2:
-      return Leviathan_ProcessLz<LeviathanModeLamSub, false>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 3:
-      return Leviathan_ProcessLz<LeviathanModeSubAnd3, false>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 4:
-      return Leviathan_ProcessLz<LeviathanModeO1, false>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 5:
-      return Leviathan_ProcessLz<LeviathanModeSubAndF, false>(lzt, dst_cur, dst, dst_end, dst_start);
-    }
-  } else {
-    // multi cmd mode
-    switch (chunk_type) {
-    case 0:
-      return Leviathan_ProcessLz<LeviathanModeSub, true>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 1:
-      return Leviathan_ProcessLz<LeviathanModeRaw, true>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 2:
-      return Leviathan_ProcessLz<LeviathanModeLamSub, true>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 3:
-      return Leviathan_ProcessLz<LeviathanModeSubAnd3, true>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 4:
-      return Leviathan_ProcessLz<LeviathanModeO1, true>(lzt, dst_cur, dst, dst_end, dst_start);
-    case 5:
-      return Leviathan_ProcessLz<LeviathanModeSubAndF, true>(lzt, dst_cur, dst, dst_end, dst_start);
-    }
-
+  const bool multi_cmd_mode = lzt->cmd_stream == nullptr;
+  switch (chunk_type) {
+  case 0: return Leviathan_ProcessLz<LeviathanModeSub>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
+  case 1: return Leviathan_ProcessLz<LeviathanModeRaw>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
+  case 2: return Leviathan_ProcessLz<LeviathanModeLamSub>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
+  case 3: return Leviathan_ProcessLz<LeviathanModeSubAnd3>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
+  case 4: return Leviathan_ProcessLz<LeviathanModeO1>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
+  case 5: return Leviathan_ProcessLz<LeviathanModeSubAndF>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
+  default: return false;
   }
-  return false;
 }
-
-
 
 // Decode one 256kb big quantum block. It's divided into two 128k blocks
 // internally that are compressed separately but with a shared history.
@@ -3214,25 +3152,21 @@ int Leviathan_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
   while (dst_end - dst != 0) {
     dst_count = dst_end - dst;
     dst_count = std::min(dst_count, 0x20000);
-    if (src_end - src < 4)
-      return -1;
+    if (src_end - src < 4) return -1;
     chunkhdr = src[2] | src[1] << 8 | src[0] << 16;
     if (!(chunkhdr & 0x800000)) {
       // Stored as entropy without any match copying.
       byte *out = dst;
       src_used = Kraken_DecodeBytes(&out, src, src_end, &written_bytes, dst_count, false, dec->scratch, scratch_end);
-      if (src_used < 0 || written_bytes != dst_count)
-        return -1;
+      if (src_used < 0 || written_bytes != dst_count) return -1;
     } else {
       src += 3;
       src_used = chunkhdr & 0x7FFFF;
       mode = (chunkhdr >> 19) & 0xF;
-      if (src_end - src < src_used)
-        return -1;
+      if (src_end - src < src_used) return -1;
       if (src_used < dst_count) {
         const size_t scratch_usage = Min(Min(3 * dst_count + 32 + 0xd000, 0x6C000), scratch_end - dec->scratch);
-        if (scratch_usage < sizeof(LeviathanLzTable))
-          return -1;
+        if (scratch_usage < sizeof(LeviathanLzTable)) return -1;
         if (!Leviathan_ReadLzTable(mode,
             src, src + src_used,
             dst, dst_count,
@@ -3240,8 +3174,7 @@ int Leviathan_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
             dec->scratch + sizeof(LeviathanLzTable), dec->scratch + scratch_usage,
             (LeviathanLzTable*)dec->scratch))
           return -1;
-        if (!Leviathan_ProcessLzRuns(mode, dst, dst_count, dst - dst_start, (LeviathanLzTable*)dec->scratch))
-          return -1;
+        if (!Leviathan_ProcessLzRuns(mode, dst, dst_count, dst - dst_start, (LeviathanLzTable*)dec->scratch)) return -1;
       } else if (src_used > dst_count || mode != 0) {
         return -1;
       } else {
