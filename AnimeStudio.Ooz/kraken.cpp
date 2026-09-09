@@ -962,11 +962,9 @@ int Huff_ConvertToRanges(HuffRange *range, const int num_symbols, const int P, c
 }
 
 int Huff_ReadCodeLengthsNew(BitReader *bits, uint8 *syms, uint32 *code_prefix) {
-  int forced_bits = BitReader_ReadBitsNoRefill(bits, 2);
-
-  int num_symbols = BitReader_ReadBitsNoRefill(bits, 8) + 1;
-
-  int fluff = BitReader_ReadFluff(bits, num_symbols);
+  const int forced_bits = BitReader_ReadBitsNoRefill(bits, 2);
+  const int num_symbols = BitReader_ReadBitsNoRefill(bits, 8) + 1;
+  const int fluff = BitReader_ReadFluff(bits, num_symbols);
 
   uint8 code_len[512];
   BitReader2 br2;
@@ -974,11 +972,9 @@ int Huff_ReadCodeLengthsNew(BitReader *bits, uint8 *syms, uint32 *code_prefix) {
   br2.p_end = bits->p_end;
   br2.p = bits->p - static_cast<unsigned>((24 - bits->bitpos + 7) >> 3);
 
-  if (!DecodeGolombRiceLengths(code_len, num_symbols + fluff, &br2))
-    return -1;
+  if (!DecodeGolombRiceLengths(code_len, num_symbols + fluff, &br2)) return -1;
   memset(code_len + (num_symbols + fluff), 0, 16);
-  if (!DecodeGolombRiceBits(code_len, num_symbols, forced_bits, &br2))
-    return -1;
+  if (!DecodeGolombRiceBits(code_len, num_symbols, forced_bits, &br2)) return -1;
    
   // Reset the bits decoder.
   bits->bitpos = 24;
@@ -988,62 +984,18 @@ int Huff_ReadCodeLengthsNew(BitReader *bits, uint8 *syms, uint32 *code_prefix) {
   bits->bits <<= br2.bitpos;
   bits->bitpos += br2.bitpos;
 
-  if (1) {
-    uint running_sum = 0x1e;
-    int maxlen = 11;
-    for (int i = 0; i < num_symbols; i++) {
-      int v = code_len[i];
-      v = -(int)(v & 1) ^ (v >> 1);
-      code_len[i] = v + (running_sum >> 2) + 1;
-      if (code_len[i] < 1 || code_len[i] > 11)
-        return -1;
-      running_sum += v;
-    }
-
-  } else {
-    // Ensure we don't read unknown data that could contaminate
-    // max_codeword_len.
-    simde__m128i bak = simde_mm_loadu_si128((simde__m128i*)&code_len[num_symbols]);
-    simde_mm_storeu_si128((simde__m128i*)&code_len[num_symbols], simde_mm_set1_epi32(0));
-    // apply a filter
-    simde__m128i avg = simde_mm_set1_epi8(0x1e);
-    simde__m128i ones = simde_mm_set1_epi8(1);
-    simde__m128i max_codeword_len = simde_mm_set1_epi8(10);
-    for (uint i = 0; i < num_symbols; i += 16) {
-      simde__m128i v = simde_mm_loadu_si128((simde__m128i*)&code_len[i]), t;
-      // avg[0..15] = avg[15]
-      avg = simde_mm_unpackhi_epi8(avg, avg);
-      avg = simde_mm_unpackhi_epi8(avg, avg);
-      avg = simde_mm_shuffle_epi32(avg, 255);
-      // v = -(int)(v & 1) ^ (v >> 1)
-      v = simde_mm_xor_si128(simde_mm_sub_epi8(simde_mm_set1_epi8(0), simde_mm_and_si128(v, ones)),
-        simde_mm_and_si128(simde_mm_srli_epi16(v, 1), simde_mm_set1_epi8(0x7f)));
-      // create all the sums. v[n] = v[0] + ... + v[n]
-      t = simde_mm_add_epi8(simde_mm_slli_si128(v, 1), v);
-      t = simde_mm_add_epi8(simde_mm_slli_si128(t, 2), t);
-      t = simde_mm_add_epi8(simde_mm_slli_si128(t, 4), t);
-      t = simde_mm_add_epi8(simde_mm_slli_si128(t, 8), t);
-      // u[x] = (avg + t[x-1]) >> 2
-      simde__m128i u = simde_mm_and_si128(simde_mm_srli_epi16(simde_mm_add_epi8(simde_mm_slli_si128(t, 1), avg), 2u), simde_mm_set1_epi8(0x3f));
-      // v += u
-      v = simde_mm_add_epi8(v, u);
-      // avg += t
-      avg = simde_mm_add_epi8(avg, t);
-      // max_codeword_len = max(max_codeword_len, v)
-      max_codeword_len = simde_mm_max_epu8(max_codeword_len, v);
-      // mem[] = v+1
-      simde_mm_storeu_si128((simde__m128i*)&code_len[i], simde_mm_add_epi8(v, simde_mm_set1_epi8(1)));
-    }
-    simde_mm_storeu_si128((simde__m128i*)&code_len[num_symbols], bak);
-    if (simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(max_codeword_len, simde_mm_set1_epi8(10))) != 0xffff)
-      return -1; // codeword too big?
+  uint running_sum = 0x1e;
+  for (int i = 0; i < num_symbols; i++) {
+    int v = code_len[i];
+    v = -(v & 1) ^ (v >> 1);
+    code_len[i] = v + (running_sum >> 2) + 1;
+    if (code_len[i] < 1 || code_len[i] > 11) return -1;
+    running_sum += v;
   }
 
   HuffRange range[128];
-  int ranges = Huff_ConvertToRanges(range, num_symbols, fluff, &code_len[num_symbols], bits);
-  if (ranges <= 0)
-    return -1;
-  
+  const int ranges = Huff_ConvertToRanges(range, num_symbols, fluff, &code_len[num_symbols], bits);
+  if (ranges <= 0) return -1;
   uint8 *cp = code_len;
   for (int i = 0; i < ranges; i++) {
     int sym = range[i].symbol;
@@ -1057,10 +1009,8 @@ int Huff_ReadCodeLengthsNew(BitReader *bits, uint8 *syms, uint32 *code_prefix) {
 }
 
 struct NewHuffLut {
-  // Mapping that maps a bit pattern to a code length.
-  uint8 bits2len[2048 + 16];
-  // Mapping that maps a bit pattern to a symbol.
-  uint8 bits2sym[2048 + 16];
+  uint8 bits2len[2048 + 16]; // Mapping that maps a bit pattern to a code length.
+  uint8 bits2sym[2048 + 16]; // Mapping that maps a bit pattern to a symbol.
 };
 
 // May overflow 16 bytes past the end
@@ -1076,8 +1026,7 @@ bool Huff_MakeLut(const uint32 *prefix_org, const uint32 *prefix_cur, NewHuffLut
     if (count) {
       const uint32 stepsize = 1 << (11 - i);
       const uint32 num_to_set = count << (11 - i);
-      if (currslot + num_to_set > 2048)
-        return false;
+      if (currslot + num_to_set > 2048) return false;
       FillByteOverflow16(&hufflut->bits2len[currslot], i, num_to_set);
 
       uint8 *p = &hufflut->bits2sym[currslot];
@@ -1088,8 +1037,7 @@ bool Huff_MakeLut(const uint32 *prefix_org, const uint32 *prefix_cur, NewHuffLut
   }
   if (prefix_cur[11] - prefix_org[11] != 0) {
     const uint32 num_to_set = prefix_cur[11] - prefix_org[11];
-    if (currslot + num_to_set > 2048)
-      return false;
+    if (currslot + num_to_set > 2048) return false;
     FillByteOverflow16(&hufflut->bits2len[currslot], 11, num_to_set);
     memcpy(&hufflut->bits2sym[currslot], &syms[prefix_org[11]], num_to_set);
     currslot += num_to_set;
@@ -1208,14 +1156,10 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
                             uint8 **array_data, int *array_lens, int array_count,
                             int *total_size_out, bool force_memmove, uint8 *scratch, const uint8 *scratch_end) {
   const uint8 *src_org = src;
-
-  if (src_end - src < 4)
-    return -1;
-
+  if (src_end - src < 4) return -1;
   int decoded_size;
   int num_arrays_in_file = *src++;
-  if (!(num_arrays_in_file & 0x80))
-    return -1;
+  if (!(num_arrays_in_file & 0x80)) return -1;
   num_arrays_in_file &= 0x3f;
 
   if (dst == scratch) {
@@ -1225,13 +1169,11 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
   }
 
   int total_size = 0;
-
   if (num_arrays_in_file == 0) {
     for (int i = 0; i < array_count; i++) {
       uint8 *chunk_dst = dst;
       int dec = Kraken_DecodeBytes(&chunk_dst, src, src_end, &decoded_size, dst_end - dst, force_memmove, scratch, scratch_end);
-      if (dec < 0)
-        return -1;
+      if (dec < 0) return -1;
       dst += decoded_size;
       array_lens[i] = decoded_size;
       array_data[i] = chunk_dst;
@@ -1251,8 +1193,7 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
   for(int i = 0; i < num_arrays_in_file; i++) {
     uint8 *chunk_dst = scratch_cur;
     int dec = Kraken_DecodeBytes(&chunk_dst, src, src_end, &decoded_size, scratch_end - scratch_cur, force_memmove, scratch_cur, scratch_end);
-    if (dec < 0)
-      return -1;
+    if (dec < 0) return -1;
     entropy_array_data[i] = chunk_dst;
     entropy_array_size[i] = decoded_size;
     scratch_cur += decoded_size;
@@ -1261,37 +1202,27 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
   }
   *total_size_out = total_size;
 
-  if (src_end - src < 3)
-    return -1;
-  
+  if (src_end - src < 3) return -1;
   int Q = *(uint16*)src;
   src += 2;
-
   int out_size;
-  if (Kraken_GetBlockSize(src, src_end, &out_size, total_size) < 0)
-    return -1;
+  if (Kraken_GetBlockSize(src, src_end, &out_size, total_size) < 0) return -1;
   int num_indexes = out_size;
 
   int num_lens = num_indexes - array_count;
-  if (num_lens < 1)
-    return -1;
-
-  if (scratch_end - scratch_cur < num_indexes)
-    return -1;
+  if (num_lens < 1) return -1;
+  if (scratch_end - scratch_cur < num_indexes) return -1;
   uint8 *interval_lenlog2 = scratch_cur;
   scratch_cur += num_indexes;
 
-  if (scratch_end - scratch_cur < num_indexes)
-    return -1;
+  if (scratch_end - scratch_cur < num_indexes) return -1;
   uint8 *interval_indexes = scratch_cur;
   scratch_cur += num_indexes;
-
  
   if (Q & 0x8000) {
     int size_out;
     int n = Kraken_DecodeBytes(&interval_indexes, src, src_end, &size_out, num_indexes, true, scratch_cur, scratch_end);
-    if (n < 0 || size_out != num_indexes)
-      return -1;
+    if (n < 0 || size_out != num_indexes) return -1;
     src += n;
 
     for (int i = 0; i < num_indexes; i++) {
@@ -1303,45 +1234,32 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
     num_lens = num_indexes;
   } else {
     int lenlog2_chunksize = num_indexes - array_count;
-
     int size_out;
     int n = Kraken_DecodeBytes(&interval_indexes, src, src_end, &size_out, num_indexes, false, scratch_cur, scratch_end);
-    if (n < 0 || size_out != num_indexes)
-      return -1;
+    if (n < 0 || size_out != num_indexes) return -1;
     src += n;
 
     n = Kraken_DecodeBytes(&interval_lenlog2, src, src_end, &size_out, lenlog2_chunksize, false, scratch_cur, scratch_end);
-    if (n < 0 || size_out != lenlog2_chunksize)
-      return -1;
+    if (n < 0 || size_out != lenlog2_chunksize) return -1;
     src += n;
 
     for (int i = 0; i < lenlog2_chunksize; i++)
-      if (interval_lenlog2[i] > 16)
-        return -1;
+      if (interval_lenlog2[i] > 16) return -1;
   }
 
-  if (scratch_end - scratch_cur < 4)
-    return -1;
-
+  if (scratch_end - scratch_cur < 4) return -1;
   scratch_cur = ALIGN_POINTER(scratch_cur, 4);
-  if (scratch_end - scratch_cur < num_lens * 4)
-    return -1;
+  if (scratch_end - scratch_cur < num_lens * 4) return -1;
   uint32 *decoded_intervals = (uint32*)scratch_cur;
-
   int varbits_complen = Q & 0x3FFF;
-  if (src_end - src < varbits_complen)
-    return -1;
-
+  if (src_end - src < varbits_complen) return -1;
   const uint8 *f = src;
   uint32 bits_f = 0;
   int bitpos_f = 24;
-
   const uint8 *src_end_actual = src + varbits_complen;
-
   const uint8 *b = src_end_actual;
   uint32 bits_b = 0;
   int bitpos_b = 24;
-  
 
   int i;
   for (i = 0; i + 2 <= num_lens; i += 2) {
@@ -1379,26 +1297,20 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
     decoded_intervals[i + 0] = value_f;
   }
 
-  if (interval_indexes[num_indexes - 1])
-    return -1;
-
+  if (interval_indexes[num_indexes - 1]) return -1;
   int indi = 0, leni = 0, source;
   int increment_leni = (Q & 0x8000) != 0;
 
   for(int arri = 0; arri < array_count; arri++) {
     array_data[arri] = dst;
-    if (indi >= num_indexes)
-      return -1;
+    if (indi >= num_indexes) return -1;
 
     while ((source = interval_indexes[indi++]) != 0) {
-      if (source > num_arrays_in_file)
-        return -1;
-      if (leni >= num_lens)
-        return -1;
+      if (source > num_arrays_in_file) return -1;
+      if (leni >= num_lens) return -1;
       int cur_len = decoded_intervals[leni++];
       int bytes_left = entropy_array_size[source - 1];
-      if (cur_len > bytes_left || cur_len > dst_end - dst)
-        return -1;
+      if (cur_len > bytes_left || cur_len > dst_end - dst) return -1;
       uint8 *blksrc = entropy_array_data[source - 1];
       entropy_array_size[source - 1] -= cur_len;
       entropy_array_data[source - 1] += cur_len;
@@ -1410,12 +1322,9 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
     array_lens[arri] = dst - array_data[arri];
   }
 
-  if (indi != num_indexes || leni != num_lens)
-    return -1;
-
+  if (indi != num_indexes || leni != num_lens) return -1;
   for (int i = 0; i < num_arrays_in_file; i++) {
-    if (entropy_array_size[i])
-      return -1;
+    if (entropy_array_size[i]) return -1;
   }
   return src_end_actual - src_org;
 }
@@ -3561,19 +3470,18 @@ bool Mermaid_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
 }
 } // mermaid
 
-void Kraken_CopyWholeMatch(byte *dst, const uint32 offset, const size_t length) {
-  size_t i = 0;
-  byte *src = dst - offset;
-  if (offset >= 8) {
-    for (; i + 8 <= length; i += 8)
-      *(uint64*)(dst + i) = *(uint64*)(src + i);
-  } 
-  for (; i < length; i++)
-    dst[i] = src[i];
-}
-
 namespace {
-bool kraken_step(KrakenDecoder *dec) {
+bool step(KrakenDecoder *dec) {
+  if ((dec->offset & 0x3ffff) == 0) {
+    const int b0 = dec->src[0], b1 = dec->src[1]; dec->src += 2;
+    if ((b0 & 0x3f) != 0x0c) return false; // 「..001100|........」
+    dec->hdr.uncompressed = (b0 >> 6) & 1; // 「.?......|........」
+    dec->hdr.restart_decoder = (b0 >> 7) & 1; // 「?.......|........」
+    dec->hdr.decoder_type = b1 & 0x7f; // 「........|.???????」
+    dec->hdr.use_checksums = !!(b1 >> 7); // 「........|?.......」
+    // printf("hdr: %d %d\n", b0, b1);
+  }
+
   const auto dst_bytes_left = std::min((u32)0x40000, dec->dst_len);
 
   if (dec->hdr.uncompressed) {
@@ -3592,8 +3500,7 @@ bool kraken_step(KrakenDecoder *dec) {
     return step_ret(dec, 0, dst_bytes_left);
   }
   if (dec->hdr.use_checksums) dec->src += 3; // checksum not implemented
-  if (compressed_size > dec->src_len) return false; // Too few bytes in buffer to make any progress?
-  if (compressed_size > dst_bytes_left) return false;
+  if (compressed_size > dec->src_len || compressed_size > dst_bytes_left) return false; // Too few bytes in buffer to make any progress?
 
   int n;
   switch (dec->hdr.decoder_type) {
@@ -3604,20 +3511,6 @@ bool kraken_step(KrakenDecoder *dec) {
   }
   if (n != compressed_size) return false;
   return step_ret(dec, n, dst_bytes_left);
-}
-
-bool step(KrakenDecoder *dec) {
-  if ((dec->offset & 0x3ffff) == 0) {
-    const int b0 = dec->src[0], b1 = dec->src[1]; dec->src += 2;
-    if ((b0 & 0x3f) != 0x0c) return false; // 「..001100|........」
-    dec->hdr.uncompressed = (b0 >> 6) & 1; // 「.?......|........」
-    dec->hdr.restart_decoder = (b0 >> 7) & 1; // 「?.......|........」
-    dec->hdr.decoder_type = b1 & 0x7f; // 「........|.???????」
-    dec->hdr.use_checksums = !!(b1 >> 7); // 「........|?.......」
-    // printf("hdr: %d %d\n", b0, b1);
-  }
-
-  return kraken_step(dec);
 }
 
 int kraken_decompress(uint8_t const* src, const size_t src_len, byte *dst, const size_t dst_len) {
