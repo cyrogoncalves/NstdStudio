@@ -2511,10 +2511,21 @@ struct LeviathanLzTable {
   uint8 *cmd_stream;
 };
 
-bool Leviathan_ReadLzTable(const int chunk_type,
-                           const byte *src, const byte *src_end,
-                           byte *dst, const int dst_size, const int offset,
-                           byte *scratch, byte *scratch_end, LeviathanLzTable *lztable) {
+bool Leviathan_ReadLzTable(
+  const KrakenDecoder *dec,
+  const int chunk_type,
+  const int src_used,
+  const int dst_size,
+  LeviathanLzTable *lztable
+) {
+  const size_t scratch_usage = Min(Min(3 * dst_size + 0xd020, 0x6c000), dec->scratch_size);
+  if (scratch_usage < sizeof(LeviathanLzTable)) return false;
+  byte *scratch_end = dec->scratch + scratch_usage;
+  const byte *src = dec->src;
+  const byte *src_end = dec->src + src_used;
+  byte *dst = dec->dst1;
+  const int offset = dec->offset;
+  byte *scratch = dec->scratch + sizeof(LeviathanLzTable);
   byte *packed_offs_stream, *packed_len_stream, *out;
   int decode_count, n;
 
@@ -3028,18 +3039,21 @@ bool Leviathan_ProcessLz(LeviathanLzTable *lzt, uint8 *dst,
   return true;
 }
 
-bool Leviathan_ProcessLzRuns(const int chunk_type, byte *dst, const int dst_size, const int offset, LeviathanLzTable *lzt) {
-  uint8 *dst_cur = dst + (offset == 0 ? 8 : 0);
-  uint8 *dst_end = dst + dst_size;
-  uint8 *dst_start = dst - offset;
+bool Leviathan_ProcessLzRuns(const KrakenDecoder *dec, const int chunk_type, const int src_used, const int dst_size) {
+  LeviathanLzTable *lzt = (LeviathanLzTable *)dec->scratch;
+  if (!Leviathan_ReadLzTable(dec, chunk_type, src_used, dst_size, lzt)) return false;
+
+  uint8 *dst_cur = dec->dst1 + (dec->offset == 0 ? 8 : 0);
+  uint8 *dst_end = dec->dst1 + dst_size;
+  uint8 *dst_start = dec->dst1 - dec->offset;
   const bool multi_cmd_mode = lzt->cmd_stream == nullptr;
   switch (chunk_type) {
-  case 0: return Leviathan_ProcessLz<LeviathanModeSub>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
-  case 1: return Leviathan_ProcessLz<LeviathanModeRaw>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
-  case 2: return Leviathan_ProcessLz<LeviathanModeLamSub>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
-  case 3: return Leviathan_ProcessLz<LeviathanModeSubAnd3>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
-  case 4: return Leviathan_ProcessLz<LeviathanModeO1>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
-  case 5: return Leviathan_ProcessLz<LeviathanModeSubAndF>(lzt, dst_cur, dst, dst_end, dst_start, multi_cmd_mode);
+  case 0: return Leviathan_ProcessLz<LeviathanModeSub>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
+  case 1: return Leviathan_ProcessLz<LeviathanModeRaw>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
+  case 2: return Leviathan_ProcessLz<LeviathanModeLamSub>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
+  case 3: return Leviathan_ProcessLz<LeviathanModeSubAnd3>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
+  case 4: return Leviathan_ProcessLz<LeviathanModeO1>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
+  case 5: return Leviathan_ProcessLz<LeviathanModeSubAndF>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
   default: return false;
   }
 }
@@ -3047,47 +3061,33 @@ bool Leviathan_ProcessLzRuns(const int chunk_type, byte *dst, const int dst_size
 // Decode one 256kb big quantum block. It's divided into two 128k blocks
 // internally that are compressed separately but with a shared history.
 bool Leviathan_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
-  byte* dst = dec->dst1;
-  const byte *dst_end = dst + std::min((u32)0x40000, dec->dst_len);
-  // const byte *src = dec->src;
+  const auto dst_bytes_left = std::min<u32>(dec->dst_len, 0x40000);
+  const byte *dst_end = dec->dst1 + dst_bytes_left;
   const byte *src_end = dec->src + compressed_size;
-  byte *scratch_end = dec->scratch + dec->scratch_size;
-  int src_used;
+  const byte *scratch_end = dec->scratch + dec->scratch_size;
 
-  while (dst_end - dst != 0) {
-    int dst_count = dst_end - dst;
+  while (dst_end - dec->dst1 != 0) {
+    int dst_count = dst_end - dec->dst1;
     dst_count = std::min(dst_count, 0x20000);
     if (src_end - dec->src < 4) return false;
     const int chunk_hdr = dec->src[2] | dec->src[1] << 8 | dec->src[0] << 16;
-    if (!(chunk_hdr & 0x800000)) {
-      // Stored as entropy without any match copying.
-      byte *out = dst;
-      int written_bytes;
-      src_used = Kraken_DecodeBytes(&out, dec->src, src_end, &written_bytes, dst_count, false, dec->scratch, scratch_end);
-      if (src_used < 0 || written_bytes != dst_count) return false;
-    } else {
+    if (chunk_hdr & 0x800000) {
       dec->src += 3;
-      src_used = chunk_hdr & 0x7FFFF;
-      const int mode = (chunk_hdr >> 19) & 0xF;
+      const int src_used = chunk_hdr & 0x7ffff;
+      const int mode = (chunk_hdr >> 19) & 0xf;
       if (src_end - dec->src < src_used) return false;
-      if (src_used < dst_count) {
-        const size_t scratch_usage = Min(Min(3 * dst_count + 32 + 0xd000, 0x6C000), scratch_end - dec->scratch);
-        if (scratch_usage < sizeof(LeviathanLzTable)) return false;
-        if (!Leviathan_ReadLzTable(mode,
-            dec->src, dec->src + src_used,
-            dst, dst_count,
-            dst - dec->dst,
-            dec->scratch + sizeof(LeviathanLzTable), dec->scratch + scratch_usage,
-            (LeviathanLzTable*)dec->scratch)) return false;
-        if (!Leviathan_ProcessLzRuns(mode, dst, dst_count, dst - dec->dst, (LeviathanLzTable*)dec->scratch)) return false;
-      } else if (src_used > dst_count || mode != 0) {
-        return -1;
+      if (src_used >= dst_count) {
+        if (src_used > dst_count || mode != 0) return false;
+        memmove(dec->dst1, dec->src, dst_count);
       } else {
-        memmove(dst, dec->src, dst_count);
-        dec->src += src_used;
+        if (!Leviathan_ProcessLzRuns(dec, mode, src_used, dst_count)) return false;
       }
+    } else { // Stored as entropy without any match copying.
+      int written_bytes;
+      const int src_used = Kraken_DecodeBytes(&dec->dst1, dec->src, src_end, &written_bytes, dst_count, false, dec->scratch, scratch_end);
+      if (src_used < 0 || written_bytes != dst_count) return false;
     }
-    dst += dst_count;
+    dec->dst1 += dst_count;
   }
   return dec->src == src_end;
 }
@@ -3420,7 +3420,6 @@ bool Mermaid_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
         memmove(dec->dst1, dec->src, dst_count);
       } else { // Tans Lut may need upwards of 16k of temp storage
         if (mode > 1 || src_used < 10) return false;
-        // if (!Mermaid_ReadLzTable(dec->src, src_used, dec->dst1, dst_count, dec->offset, dec->scratch + sizeof(MermaidLzTable), (MermaidLzTable *)dec->scratch)) return false;
         if (!Mermaid_ProcessLzRuns(dec, mode, src_used, dst_count)) return false;
       }
     } else { // Stored without any match copying.
