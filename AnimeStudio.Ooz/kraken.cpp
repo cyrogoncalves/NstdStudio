@@ -3046,66 +3046,60 @@ bool Leviathan_ProcessLzRuns(const int chunk_type, byte *dst, const int dst_size
 
 // Decode one 256kb big quantum block. It's divided into two 128k blocks
 // internally that are compressed separately but with a shared history.
-int Leviathan_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
-  byte* dst = dec->dst + dec->offset;
-  const auto dst_bytes_left = std::min((u32)0x40000, dec->dst_len);
-  const byte *dst_end = dst + dst_bytes_left;
-  const byte *dst_start = dec->dst;
-  const byte *src = dec->src;
+bool Leviathan_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
+  byte* dst = dec->dst1;
+  const byte *dst_end = dst + std::min((u32)0x40000, dec->dst_len);
+  // const byte *src = dec->src;
   const byte *src_end = dec->src + compressed_size;
   byte *scratch_end = dec->scratch + dec->scratch_size;
-  
-  const byte *src_in = src;
-  int mode, chunkhdr, dst_count, src_used, written_bytes;
+  int src_used;
 
   while (dst_end - dst != 0) {
-    dst_count = dst_end - dst;
+    int dst_count = dst_end - dst;
     dst_count = std::min(dst_count, 0x20000);
-    if (src_end - src < 4) return -1;
-    chunkhdr = src[2] | src[1] << 8 | src[0] << 16;
-    if (!(chunkhdr & 0x800000)) {
+    if (src_end - dec->src < 4) return false;
+    const int chunk_hdr = dec->src[2] | dec->src[1] << 8 | dec->src[0] << 16;
+    if (!(chunk_hdr & 0x800000)) {
       // Stored as entropy without any match copying.
       byte *out = dst;
-      src_used = Kraken_DecodeBytes(&out, src, src_end, &written_bytes, dst_count, false, dec->scratch, scratch_end);
-      if (src_used < 0 || written_bytes != dst_count) return -1;
+      int written_bytes;
+      src_used = Kraken_DecodeBytes(&out, dec->src, src_end, &written_bytes, dst_count, false, dec->scratch, scratch_end);
+      if (src_used < 0 || written_bytes != dst_count) return false;
     } else {
-      src += 3;
-      src_used = chunkhdr & 0x7FFFF;
-      mode = (chunkhdr >> 19) & 0xF;
-      if (src_end - src < src_used) return -1;
+      dec->src += 3;
+      src_used = chunk_hdr & 0x7FFFF;
+      const int mode = (chunk_hdr >> 19) & 0xF;
+      if (src_end - dec->src < src_used) return false;
       if (src_used < dst_count) {
         const size_t scratch_usage = Min(Min(3 * dst_count + 32 + 0xd000, 0x6C000), scratch_end - dec->scratch);
-        if (scratch_usage < sizeof(LeviathanLzTable)) return -1;
+        if (scratch_usage < sizeof(LeviathanLzTable)) return false;
         if (!Leviathan_ReadLzTable(mode,
-            src, src + src_used,
+            dec->src, dec->src + src_used,
             dst, dst_count,
-            dst - dst_start,
+            dst - dec->dst,
             dec->scratch + sizeof(LeviathanLzTable), dec->scratch + scratch_usage,
-            (LeviathanLzTable*)dec->scratch))
-          return -1;
-        if (!Leviathan_ProcessLzRuns(mode, dst, dst_count, dst - dst_start, (LeviathanLzTable*)dec->scratch)) return -1;
+            (LeviathanLzTable*)dec->scratch)) return false;
+        if (!Leviathan_ProcessLzRuns(mode, dst, dst_count, dst - dec->dst, (LeviathanLzTable*)dec->scratch)) return false;
       } else if (src_used > dst_count || mode != 0) {
         return -1;
       } else {
-        memmove(dst, src, dst_count);
+        memmove(dst, dec->src, dst_count);
+        dec->src += src_used;
       }
     }
-    src += src_used;
     dst += dst_count;
   }
-  return src - src_in;
+  return dec->src == src_end;
 }
 } // leviathan
 
 namespace {
 bool read_bytes(KrakenDecoder *dec, byte **out, u32* decode_count,
     const byte* src_end, const u32 dst_size, byte **scratch0, const byte *scratch_end) {
-  // out = *scratch0;
   const int n = Kraken_DecodeBytes(out, dec->src, src_end,
     (int*)decode_count, dst_size, false, *scratch0, scratch_end);
   if (n < 0) return false;
   dec->src += n;
-  // *scratch0 += *decode_count;
   return true;
 }
 
@@ -3476,7 +3470,7 @@ bool step(KrakenDecoder *dec) {
   switch (dec->hdr.decoder_type) {
   case 6: n = Kraken_DecodeQuantum(dec, compressed_size); break;
   case 10: return Mermaid_DecodeQuantum(dec, compressed_size);
-  case 12: n = Leviathan_DecodeQuantum(dec, compressed_size); break;
+  case 12: return Leviathan_DecodeQuantum(dec, compressed_size);
   default: return false;
   }
   if (n != compressed_size) return false;
