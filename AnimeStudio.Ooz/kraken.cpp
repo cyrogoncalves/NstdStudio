@@ -2082,11 +2082,17 @@ bool Kraken_UnpackOffsets(const byte *src, const byte *src_end,
   return true;
 }
 
-bool Kraken_ReadLzTable(
+bool Kraken_ReadLzTable(KrakenDecoder* dec, 
     const int mode, const byte *src, const byte *src_end,
-    byte *dst, const int dst_size, const int offset,
-    byte *scratch, byte *scratch_end, KrakenLzTable *lztable
+    byte *dst, const u32 dst_size, const int offset,
+    KrakenLzTable *lztable
 ) {
+  byte *scratch = dec->scratch + sizeof(KrakenLzTable);
+  byte *scratch_end = dec->scratch + dec->scratch_size;
+  const size_t scratch_usage = Min(Min(3 * dst_size + 0xd020, 0x6C000), scratch_end - dec->scratch);
+  if (scratch_usage < sizeof(KrakenLzTable)) return false;
+  scratch_end = dec->scratch + scratch_usage;
+  
   byte *out;
   int decode_count;
   byte *packed_offs_stream, *packed_len_stream;
@@ -2421,62 +2427,52 @@ bool Kraken_ProcessLzRuns_Type1(const KrakenLzTable *lzt, byte *dst, const byte 
   return true;
 }
 
-bool Kraken_ProcessLzRuns(const int mode, byte *dst, const int dst_size, const int offset, KrakenLzTable *lztable) {
-  const byte *dst_end = dst + dst_size;
-
+bool Kraken_ProcessLzRuns(KrakenDecoder *dec, const int mode, int src_used, const u32 dst_size) {
+  KrakenLzTable *lztable = (KrakenLzTable *)dec->scratch;
+  if (!Kraken_ReadLzTable(dec, mode, dec->src, dec->src + src_used, dec->dst1, dst_size, dec->offset, lztable)) return false;
+  
+  const byte *dst_end = dec->dst1 + dst_size;
   if (mode == 1)
-    return Kraken_ProcessLzRuns_Type1(lztable, dst + (offset == 0 ? 8 : 0), dst_end, dst - offset);
-
+    return Kraken_ProcessLzRuns_Type1(lztable, dec->dst1 + (dec->offset == 0 ? 8 : 0), dst_end, dec->dst);
   if (mode == 0)
-    return Kraken_ProcessLzRuns_Type0(lztable, dst + (offset == 0 ? 8 : 0), dst_end, dst - offset);
-
-
+    return Kraken_ProcessLzRuns_Type0(lztable, dec->dst1 + (dec->offset == 0 ? 8 : 0), dst_end, dec->dst);
   return false;
 }
 
 // Decode one 256kb big quantum block. It's divided into two 128k blocks
 // internally that are compressed separately but with a shared history.
 int Kraken_DecodeQuantum(KrakenDecoder *dec, const uint32 compressed_size) {
-  byte* dst = dec->dst + dec->offset;
   const auto dst_bytes_left = std::min((u32)0x40000, dec->dst_len);
-  const byte *dst_end = dst + dst_bytes_left;
-  const byte *dst_start = dec->dst;
-  const byte *src = dec->src;
+  const byte *dst_end = dec->dst1 + dst_bytes_left;
   const byte *src_end = dec->src + compressed_size;
   byte *scratch_end = dec->scratch + dec->scratch_size;
-  const byte *src_in = src;
+  const byte *src_in = dec->src;
   int src_used, written_bytes;
 
-  while (dst_end != dst) {
-    const int dst_count = std::min((int)(dst_end - dst), 0x20000);
-    if (src_end - src < 4) return -1;
-    const int chunkhdr = src[2] | src[1] << 8 | src[0] << 16;
-    if (!(chunkhdr & 0x800000)) {
-      // Stored as entropy without any match copying.
-      byte *out = dst;
-      src_used = Kraken_DecodeBytes(&out, src, src_end, &written_bytes, dst_count, false, dec->scratch, scratch_end);
-      if (src_used < 0 || written_bytes != dst_count) return -1;
-    } else {
-      src += 3;
-      src_used = chunkhdr & 0x7FFFF;
-      const int mode = (chunkhdr >> 19) & 0xF;
-      if (src_end - src < src_used) return -1;
-      if (src_used < dst_count) {
-        const size_t scratch_usage = Min(Min(3 * dst_count + 0xd020, 0x6C000), scratch_end - dec->scratch);
-        if (scratch_usage < sizeof(KrakenLzTable)) return -1;
-        if (!Kraken_ReadLzTable(mode, src, src + src_used, dst, dst_count, dst - dst_start,
-            dec->scratch + sizeof(KrakenLzTable), dec->scratch + scratch_usage, (KrakenLzTable*)dec->scratch)) return -1;
-        if (!Kraken_ProcessLzRuns(mode, dst, dst_count, dst - dst_start, (KrakenLzTable*)dec->scratch)) return -1;
-      } else if (src_used > dst_count || mode != 0) {
-        return -1;
+  while (dst_end != dec->dst1) {
+    const u32 dst_count = std::min((int)(dst_end - dec->dst1), 0x20000);
+    if (src_end - dec->src < 4) return -1;
+    const int chunk_hdr = dec->src[2] | dec->src[1] << 8 | dec->src[0] << 16;
+    if (chunk_hdr & 0x800000) {
+      dec->src += 3;
+      src_used = chunk_hdr & 0x7ffff;
+      const int mode = (chunk_hdr >> 19) & 0xf;
+      if (src_end - dec->src < src_used) return -1;
+      if (src_used >= dst_count) {
+        if (src_used > dst_count || mode != 0) return -1;
+        memmove(dec->dst1, dec->src, dst_count);
       } else {
-        memmove(dst, src, dst_count);
+        if (!Kraken_ProcessLzRuns(dec, mode, src_used, dst_count)) return -1;
       }
+    } else {
+      // Stored as entropy without any match copying.
+      src_used = Kraken_DecodeBytes(&dec->dst1, dec->src, src_end, &written_bytes, dst_count, false, dec->scratch, scratch_end);
+      if (src_used < 0 || written_bytes != dst_count) return -1;
     }
-    src += src_used;
-    dst += dst_count;
+    dec->src += src_used;
+    dec->dst1 += dst_count;
   }
-  return src - src_in;
+  return dec->src - src_in;
 }
 
 namespace {
