@@ -1999,10 +1999,8 @@ bool Kraken_UnpackOffsets(const byte *src, const byte *src_end,
                           const byte *packed_litlen_stream, const int packed_litlen_stream_size,
                           int *offs_stream, int *len_stream,
                           const bool excess_flag, int excess_bytes) {
-
-
   BitReader bits_a, bits_b;
-  int n, i;
+  int i;
   int u32_len_stream_size = 0;
   
   bits_a.bitpos = 24;
@@ -2018,9 +2016,8 @@ bool Kraken_UnpackOffsets(const byte *src, const byte *src_end,
   BitReader_RefillBackwards(&bits_b);
 
   if (!excess_flag) {
-    if (bits_b.bits < 0x2000)
-      return false;
-    n = 31 - BSR(bits_b.bits);
+    if (bits_b.bits < 0x2000) return false;
+    int n = 31 - BSR(bits_b.bits);
     bits_b.bitpos += n;
     bits_b.bits <<= n;
     BitReader_RefillBackwards(&bits_b);
@@ -2044,47 +2041,35 @@ bool Kraken_UnpackOffsets(const byte *src, const byte *src_end,
     // New way of coding offsets 
     int *offs_stream_org = offs_stream;
     const uint8 *packed_offs_stream_end = packed_offs_stream + packed_offs_stream_size;
-    uint32 cmd, offs;
     while (packed_offs_stream != packed_offs_stream_end) {
-      cmd = *packed_offs_stream++;
-      if (cmd >> 3 > 26)
-        return 0;
-      offs = ((8 + (cmd & 7)) << (cmd >> 3)) | BitReader_ReadMoreThan24Bits(&bits_a, cmd >> 3);
+      uint32 cmd = *packed_offs_stream++;
+      if (cmd >> 3 > 26) return false;
+      uint32 offs = ((8 + (cmd & 7)) << (cmd >> 3)) | BitReader_ReadMoreThan24Bits(&bits_a, cmd >> 3);
       *offs_stream++ = 8 - static_cast<int32>(offs);
       if (packed_offs_stream == packed_offs_stream_end)
         break;
       cmd = *packed_offs_stream++;
-      if (cmd >> 3 > 26)
-        return 0;
+      if (cmd >> 3 > 26) return false;
       offs = ((8 + (cmd & 7)) << (cmd >> 3)) | BitReader_ReadMoreThan24BitsB(&bits_b, cmd >> 3);
       *offs_stream++ = 8 - static_cast<int32>(offs);
     }
-    if (multi_dist_scale != 1) {
+    if (multi_dist_scale != 1)
       CombineScaledOffsetArrays(offs_stream_org, offs_stream - offs_stream_org, multi_dist_scale, packed_offs_stream_extra);
-    }
   }
   uint32 u32_len_stream_buf[512]; // max count is 128kb / 256 = 512
-  if (u32_len_stream_size > 512)
-    return false;
+  if (u32_len_stream_size > 512) return false;
    
   uint32 *u32_len_stream = u32_len_stream_buf,
          *u32_len_stream_end = u32_len_stream_buf + u32_len_stream_size;
   for (i = 0; i + 1 < u32_len_stream_size; i += 2) {
-    if (!BitReader_ReadLength(&bits_a, &u32_len_stream[i + 0]))
-      return false;
-    if (!BitReader_ReadLengthB(&bits_b, &u32_len_stream[i + 1]))
-      return false;
+    if (!BitReader_ReadLength(&bits_a, &u32_len_stream[i + 0])) return false;
+    if (!BitReader_ReadLengthB(&bits_b, &u32_len_stream[i + 1])) return false;
   }
-  if (i < u32_len_stream_size) {
-    if (!BitReader_ReadLength(&bits_a, &u32_len_stream[i + 0]))
-      return false;
-  }
+  if (i < u32_len_stream_size && !BitReader_ReadLength(&bits_a, &u32_len_stream[i + 0])) return false;
 
   bits_a.p -= (24 - bits_a.bitpos) >> 3;
   bits_b.p += (24 - bits_b.bitpos) >> 3;
-
-  if (bits_a.p != bits_b.p)
-    return false;
+  if (bits_a.p != bits_b.p) return false;
 
   for (i = 0; i < packed_litlen_stream_size; i++) {
     uint32 v = packed_litlen_stream[i];
@@ -2092,11 +2077,11 @@ bool Kraken_UnpackOffsets(const byte *src, const byte *src_end,
       v = *u32_len_stream++ + 255;
     len_stream[i] = v + 3;
   }
-  if (u32_len_stream != u32_len_stream_end)
-    return false;
+  if (u32_len_stream != u32_len_stream_end) return false;
 
   return true;
 }
+
 bool Kraken_ReadLzTable(
     const int mode, const byte *src, const byte *src_end,
     byte *dst, const int dst_size, const int offset,
@@ -2215,7 +2200,6 @@ bool Kraken_ReadLzTable(
                               lztable->offs_stream, lztable->len_stream, 0, 0);
 }
 
-
 // Note: may access memory out of bounds on invalid input.
 bool Kraken_ProcessLzRuns_Type0(const KrakenLzTable *lzt, byte *dst, const byte *dst_end, const byte *dst_start) {
   const byte *cmd_stream = lzt->cmd_stream,
@@ -2324,7 +2308,6 @@ bool Kraken_ProcessLzRuns_Type0(const KrakenLzTable *lzt, byte *dst, const byte 
   }
   return true;
 }
-
 
 // Note: may access memory out of bounds on invalid input.
 bool Kraken_ProcessLzRuns_Type1(const KrakenLzTable *lzt, byte *dst, const byte *dst_end, const byte *dst_start) {
@@ -2497,11 +2480,20 @@ int Kraken_DecodeQuantum(KrakenDecoder *dec, const uint32 compressed_size) {
 }
 
 namespace {
+bool read_bytes(KrakenDecoder *dec, byte **out, u32* decode_count,
+    const byte* src_end, const u32 dst_size, byte **scratch0, const byte *scratch_end) {
+  const int n = Kraken_DecodeBytes(out, dec->src, src_end,
+    (int*)decode_count, dst_size, false, *scratch0, scratch_end);
+  if (n < 0) return false;
+  dec->src += n;
+  return true;
+}
+
 struct LeviathanLzTable {
   int *offs_stream;
-  int offs_stream_size;
+  u32 offs_stream_size;
   int *len_stream;
-  int len_stream_size;
+  u32 len_stream_size;
   int lit_stream_size[16];
   int lit_stream_total;
   int cmd_stream_size;
@@ -2512,7 +2504,7 @@ struct LeviathanLzTable {
 };
 
 bool Leviathan_ReadLzTable(
-  const KrakenDecoder *dec,
+  KrakenDecoder *dec,
   const int chunk_type,
   const int src_used,
   const int dst_size,
@@ -2521,7 +2513,7 @@ bool Leviathan_ReadLzTable(
   const size_t scratch_usage = Min(Min(3 * dst_size + 0xd020, 0x6c000), dec->scratch_size);
   if (scratch_usage < sizeof(LeviathanLzTable)) return false;
   byte *scratch_end = dec->scratch + scratch_usage;
-  const byte *src = dec->src;
+  // const byte *src = dec->src;
   const byte *src_end = dec->src + src_used;
   byte *dst = dec->dst1;
   const int offset = dec->offset;
@@ -2529,55 +2521,45 @@ bool Leviathan_ReadLzTable(
   byte *packed_offs_stream, *packed_len_stream, *out;
   int decode_count, n;
 
-  if (chunk_type > 5 || src_end - src < 13) return false;
+  if (chunk_type > 5 || src_end - dec->src < 13) return false;
   if (offset == 0) {
-    COPY_64(dst, src)
+    COPY_64(dst, dec->src)
     dst += 8;
-    src += 8;
+    dec->src += 8;
   }
 
   int offs_scaling = 0;
   uint8 *packed_offs_stream_extra = nullptr;
   const int offs_stream_limit = dst_size / 3;
 
-  if (!(src[0] & 0x80)) {
+  u32 output_size = Min(scratch_end - scratch, offs_stream_limit);
+  if (!(dec->src[0] & 0x80)) {
     // Decode packed offset stream, it's bounded by the command length.
-    packed_offs_stream = scratch;
-    n = Kraken_DecodeBytes(&packed_offs_stream, src, src_end, &lztable->offs_stream_size,
-                           Min(scratch_end - scratch, offs_stream_limit), false, scratch, scratch_end);
-    if (n < 0) return false;
-    src += n;
-    scratch += lztable->offs_stream_size;
+    read_bytes(dec, &packed_offs_stream, &lztable->offs_stream_size, src_end, output_size, &scratch, scratch_end);
   } else {
     // uses the mode where distances are coded with 2 tables
     // and the transformation offs * scaling + low_bits
-    offs_scaling = src[0] - 127;
-    src++;
+    offs_scaling = dec->src[0] - 127;
+    dec->src++;
 
-    packed_offs_stream = scratch;
-    n = Kraken_DecodeBytes(&packed_offs_stream, src, src_end, &lztable->offs_stream_size,
-                           Min(scratch_end - scratch, offs_stream_limit), false, scratch, scratch_end);
-    if (n < 0) return false;
-    src += n;
-    scratch += lztable->offs_stream_size;
+    read_bytes(dec, &packed_offs_stream, &lztable->offs_stream_size, src_end, output_size, &scratch, scratch_end);
 
     if (offs_scaling != 1) {
-      packed_offs_stream_extra = scratch;
-      n = Kraken_DecodeBytes(&packed_offs_stream_extra, src, src_end, &decode_count,
-                             Min(scratch_end - scratch, offs_stream_limit), false, scratch, scratch_end);
-      if (n < 0 || decode_count != lztable->offs_stream_size) return false;
-      src += n;
-      scratch += decode_count;
+      u32 decode_count1;
+      read_bytes(dec, &packed_offs_stream_extra, &decode_count1, src_end, output_size, &scratch, scratch_end);
+      if (decode_count1 != lztable->offs_stream_size) return false;
     }
   }
 
   // Decode packed litlen stream. It's bounded by 1/5 of dst_size.
-  packed_len_stream = scratch;
-  n = Kraken_DecodeBytes(&packed_len_stream, src, src_end, &lztable->len_stream_size,
-                         Min(scratch_end - scratch, dst_size / 5), false, scratch, scratch_end);
-  if (n < 0) return false;
-  src += n;
-  scratch += lztable->len_stream_size;
+  output_size = Min(scratch_end - scratch, dst_size / 5);
+  read_bytes(dec, &packed_len_stream, &lztable->len_stream_size, src_end, output_size, &scratch, scratch_end);
+  // packed_len_stream = scratch;
+  // n = Kraken_DecodeBytes(&packed_len_stream, dec->src, src_end, &lztable->len_stream_size,
+  //                        Min(scratch_end - scratch, dst_size / 5), false, scratch, scratch_end);
+  // if (n < 0) return false;
+  // dec->src += n;
+  // scratch += lztable->len_stream_size;
 
   // Reserve memory for final dist stream
   scratch = ALIGN_POINTER(scratch, 16);
@@ -2594,43 +2576,43 @@ bool Leviathan_ReadLzTable(
   if (chunk_type <= 1) {
     // Decode lit stream, bounded by dst_size
     out = scratch;
-    n = Kraken_DecodeBytes(&out, src, src_end, &decode_count, Min(scratch_end - scratch, dst_size),
+    n = Kraken_DecodeBytes(&out, dec->src, src_end, &decode_count, Min(scratch_end - scratch, dst_size),
                            true, scratch, scratch_end);
     if (n < 0) return false;
-    src += n;
+    dec->src += n;
     lztable->lit_stream[0] = out;
     lztable->lit_stream_size[0] = decode_count;
   } else {
     const int array_count = chunk_type == 2 ? 2 :
                       chunk_type == 3 ? 4 : 16;
-    n = Kraken_DecodeMultiArray(src, src_end, scratch, scratch_end, lztable->lit_stream,
+    n = Kraken_DecodeMultiArray(dec->src, src_end, scratch, scratch_end, lztable->lit_stream,
                                 lztable->lit_stream_size, array_count, &decode_count,
                                 true, scratch, scratch_end);
     if (n < 0) return false;
-    src += n;
+    dec->src += n;
   }
   scratch += decode_count;
   lztable->lit_stream_total = decode_count;
-  if (src >= src_end) return false;
+  if (dec->src >= src_end) return false;
 
-  if (!(src[0] & 0x80)) {
+  if (!(dec->src[0] & 0x80)) {
     // Decode command stream, bounded by dst_size
     out = scratch;
-    n = Kraken_DecodeBytes(&out, src, src_end, &decode_count, Min(scratch_end - scratch, dst_size),
+    n = Kraken_DecodeBytes(&out, dec->src, src_end, &decode_count, Min(scratch_end - scratch, dst_size),
                            true, scratch, scratch_end);
     if (n < 0) return false;
-    src += n;
+    dec->src += n;
     lztable->cmd_stream = out;
     lztable->cmd_stream_size = decode_count;
     scratch += decode_count;
   } else {
-    if (src[0] != 0x83) return false;
-    src++;
+    if (dec->src[0] != 0x83) return false;
+    dec->src++;
     int multi_cmd_lens[8];
-    n = Kraken_DecodeMultiArray(src, src_end, scratch, scratch_end, lztable->multi_cmd_ptr,
+    n = Kraken_DecodeMultiArray(dec->src, src_end, scratch, scratch_end, lztable->multi_cmd_ptr,
                                 multi_cmd_lens, 8, &decode_count, true, scratch, scratch_end);
     if (n < 0) return false;
-    src += n;
+    dec->src += n;
     for (size_t i = 0; i < 8; i++)
       lztable->multi_cmd_end[i] = lztable->multi_cmd_ptr[i] + multi_cmd_lens[i];
 
@@ -2640,7 +2622,7 @@ bool Leviathan_ReadLzTable(
   }
   if (dst_size > scratch_end - scratch) return false;
 
-  return Kraken_UnpackOffsets(src, src_end, packed_offs_stream, packed_offs_stream_extra,
+  return Kraken_UnpackOffsets(dec->src, src_end, packed_offs_stream, packed_offs_stream_extra,
                               lztable->offs_stream_size, offs_scaling,
                               packed_len_stream, lztable->len_stream_size,
                               lztable->offs_stream, lztable->len_stream, 0, 0);
@@ -3039,21 +3021,20 @@ bool Leviathan_ProcessLz(LeviathanLzTable *lzt, uint8 *dst,
   return true;
 }
 
-bool Leviathan_ProcessLzRuns(const KrakenDecoder *dec, const int chunk_type, const int src_used, const int dst_size) {
+bool Leviathan_ProcessLzRuns(KrakenDecoder *dec, const int chunk_type, const int src_used, const int dst_size) {
   LeviathanLzTable *lzt = (LeviathanLzTable *)dec->scratch;
   if (!Leviathan_ReadLzTable(dec, chunk_type, src_used, dst_size, lzt)) return false;
 
   uint8 *dst_cur = dec->dst1 + (dec->offset == 0 ? 8 : 0);
   uint8 *dst_end = dec->dst1 + dst_size;
-  uint8 *dst_start = dec->dst1 - dec->offset;
   const bool multi_cmd_mode = lzt->cmd_stream == nullptr;
   switch (chunk_type) {
-  case 0: return Leviathan_ProcessLz<LeviathanModeSub>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
-  case 1: return Leviathan_ProcessLz<LeviathanModeRaw>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
-  case 2: return Leviathan_ProcessLz<LeviathanModeLamSub>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
-  case 3: return Leviathan_ProcessLz<LeviathanModeSubAnd3>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
-  case 4: return Leviathan_ProcessLz<LeviathanModeO1>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
-  case 5: return Leviathan_ProcessLz<LeviathanModeSubAndF>(lzt, dst_cur, dec->dst1, dst_end, dst_start, multi_cmd_mode);
+  case 0: return Leviathan_ProcessLz<LeviathanModeSub>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
+  case 1: return Leviathan_ProcessLz<LeviathanModeRaw>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
+  case 2: return Leviathan_ProcessLz<LeviathanModeLamSub>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
+  case 3: return Leviathan_ProcessLz<LeviathanModeSubAnd3>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
+  case 4: return Leviathan_ProcessLz<LeviathanModeO1>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
+  case 5: return Leviathan_ProcessLz<LeviathanModeSubAndF>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
   default: return false;
   }
 }
@@ -3094,15 +3075,6 @@ bool Leviathan_DecodeQuantum(KrakenDecoder *dec, const u32 compressed_size) {
 } // leviathan
 
 namespace {
-bool read_bytes(KrakenDecoder *dec, byte **out, u32* decode_count,
-    const byte* src_end, const u32 dst_size, byte **scratch0, const byte *scratch_end) {
-  const int n = Kraken_DecodeBytes(out, dec->src, src_end,
-    (int*)decode_count, dst_size, false, *scratch0, scratch_end);
-  if (n < 0) return false;
-  dec->src += n;
-  return true;
-}
-
 bool Mermaid_ReadLzTable(KrakenDecoder *dec, const byte *src_end, const u32 dst_size, MermaidLzTable *lz) {
   byte *scratch = dec->scratch + sizeof(MermaidLzTable);
   const byte *scratch_end = scratch + std::min<u32>((dst_size << 1) + 0x4020, 0x40000);
