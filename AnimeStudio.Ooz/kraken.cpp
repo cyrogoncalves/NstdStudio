@@ -149,15 +149,6 @@ typedef struct KrakenDecoder {
 
   KrakenHeader hdr;
 } KrakenDecoder;
-
-bool step_ret(KrakenDecoder *dec, const u64 src_used, const u64 dst_used) {
-  dec->src += src_used;
-  dec->src_len -= src_used;
-  dec->dst1 += dst_used;
-  dec->offset += dst_used;
-  dec->dst_len -= dst_used;
-  return src_used > 0;
-}
 }
 
 typedef struct BitReader {
@@ -2981,14 +2972,14 @@ bool Leviathan_ProcessLz(LeviathanLzTable *lzt, uint8 *dst,
   return true;
 }
 
-bool Leviathan_ProcessLzRuns(KrakenDecoder *dec, const int chunk_type, const int src_used, const int dst_size) {
+bool Leviathan_ProcessLzRuns(KrakenDecoder *dec, const int mode, const int src_used, const u32 dst_size) {
   LeviathanLzTable *lzt = (LeviathanLzTable *)dec->scratch;
-  if (!Leviathan_ReadLzTable(dec, chunk_type, src_used, dst_size, lzt)) return false;
+  if (!Leviathan_ReadLzTable(dec, mode, src_used, dst_size, lzt)) return false;
 
   uint8 *dst_cur = dec->dst1 + (dec->offset == 0 ? 8 : 0);
   uint8 *dst_end = dec->dst1 + dst_size;
   const bool multi_cmd_mode = lzt->cmd_stream == nullptr;
-  switch (chunk_type) {
+  switch (mode) {
   case 0: return Leviathan_ProcessLz<LeviathanModeSub>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
   case 1: return Leviathan_ProcessLz<LeviathanModeRaw>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
   case 2: return Leviathan_ProcessLz<LeviathanModeLamSub>(lzt, dst_cur, dec->dst1, dst_end, dec->dst, multi_cmd_mode);
@@ -3276,7 +3267,6 @@ bool Mermaid_ProcessLzRuns(KrakenDecoder *dec, const int mode, const int src_use
   const auto lz = reinterpret_cast<MermaidLzTable *>(dec->scratch);
   const byte *src_end = dec->src + src_used;
   if (!Mermaid_ReadLzTable(dec, src_end, dst_size, lz)) return false;
-
   int32 saved_dist = -8;
 
   // iteration 1
@@ -3318,7 +3308,12 @@ bool step(KrakenDecoder *dec) {
   if (dec->hdr.uncompressed) {
     if (dec->src_len < dst_bytes_left) return false;
     memmove(dec->dst1, dec->src, dst_bytes_left);
-    return step_ret(dec, dst_bytes_left, dst_bytes_left);
+    dec->src += dst_bytes_left;
+    dec->src_len -= dst_bytes_left;
+    dec->dst1 += dst_bytes_left;
+    dec->offset += dst_bytes_left;
+    dec->dst_len -= dst_bytes_left;
+    return dst_bytes_left > 0;
   }
 
   const u32 v = dec->src[0] << 16 | dec->src[1] << 8 | dec->src[2]; dec->src += 3;
@@ -3328,7 +3323,10 @@ bool step(KrakenDecoder *dec) {
     if (v >> 18 != 1) return false; // 「??????11|11111111|11111111」
     memset(dec->dst1, dec->src[0], dst_bytes_left);
     dec->src += 1;
-    return step_ret(dec, 0, dst_bytes_left);
+    dec->dst1 += dst_bytes_left;
+    dec->offset += dst_bytes_left;
+    dec->dst_len -= dst_bytes_left;
+    return false;
   }
   if (dec->hdr.use_checksums) dec->src += 3; // checksum not implemented
   if (compressed_size > dec->src_len || compressed_size > dst_bytes_left) return false; // Too few bytes in buffer to make any progress?
@@ -3347,9 +3345,9 @@ bool step(KrakenDecoder *dec) {
       const int src_used = chunk_hdr & 0x7ffff; //「1....???|????????|????????」 u19
       const int mode = chunk_hdr >> 19 & 0xf; //「1????...|........|........」 u4
       // printf("quantum mode=%d size=%d pos=(%p)\n", mode, src_used, dec->src);
-      if (src_end - dec->src < src_used) return false;
-      if (src_used >= dst_count) {
-        if (src_used > dst_count || mode != 0) return false;
+      if (src_end - dec->src < src_used || src_used > dst_count) return false;
+      if (src_used == dst_count) {
+        if (mode != 0) return false;
         memmove(dec->dst1, dec->src, dst_count);
       } else {
         switch (dec->hdr.decoder_type) {
